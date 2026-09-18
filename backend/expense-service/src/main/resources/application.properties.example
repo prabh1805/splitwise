@@ -1,11 +1,11 @@
-spring.application.name=expense-service
-server.port=8080
-
 spring.datasource.url=jdbc:mysql://localhost:3306/expense_service?createDatabaseIfNotExist=true
 spring.datasource.username=root
-spring.datasource.password=1805
+spring.datasource.password=CHANGE_ME
 
 spring.jpa.hibernate.ddl-auto=update
 spring.jpa.show-sql=true
 spring.jpa.properties.hibernate.format_sql=true
 
+aiven.kafka.bootstrap-servers=your-service-name.aivencloud.com:PORT
+aiven.kafka.username=avnadmin
+aiven.kafka.password=CHANGE_ME
