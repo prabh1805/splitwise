@@ -1,16 +1,25 @@
-# Compiled class file
-*.class
+# ===== OS =====
+.DS_Store
+Thumbs.db
 
-# Log file
-*.log
-
-# BlueJ files
+# ===== IDEs =====
+.idea/
+*.iml
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
 *.ctxt
 
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
+# ===== Java / Maven =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
 *.jar
 *.war
 *.nar
@@ -18,7 +27,42 @@
 *.zip
 *.tar.gz
 *.rar
-
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+.mtj.tmp/
 hs_err_pid*
-replay_pid*
+
+# ===== Gradle =====
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ===== Frontend (React / Node) =====
+node_modules/
+dist/
+.next/
+.vite/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# ===== Env files & secrets =====
+.env
+.env.*
+!.env.example
+application-local.properties
+application-local.yml
+application-secret*.properties
+application-secret*.yml
+*.pem
+*.key
+
+# ===== Logs & temp =====
+*.log
+logs/
+tmp/
+*.tmp
+*.swp
+
+# ===== Docker (local overrides) =====
+docker-compose.override.yml
