@@ -1,9 +1,6 @@
 package com.prabh.splitwise.expense.service;
 
-import com.prabh.splitwise.expense.dto.CustomSplitRequest;
-import com.prabh.splitwise.expense.dto.EqualSplitRequest;
-import com.prabh.splitwise.expense.dto.ExpenseRequest;
-import com.prabh.splitwise.expense.dto.ParticipantShare;
+import com.prabh.splitwise.expense.dto.*;
 import com.prabh.splitwise.expense.entity.Expense;
 import com.prabh.splitwise.expense.entity.ExpenseShare;
 import com.prabh.splitwise.expense.entity.Outbox;
@@ -14,8 +11,16 @@ import com.prabh.splitwise.expense.repository.ExpenseRepository;
 import com.prabh.splitwise.expense.repository.ExpenseShareRepository;
 import com.prabh.splitwise.expense.repository.OutboxRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
@@ -24,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -34,7 +40,7 @@ public class ExpenseService {
     private final OutboxRepository outboxRepository;
 
     @Transactional
-    public Expense createExpense(ExpenseRequest request) {
+    public ExpenseResponse createExpense(ExpenseRequest request) {
         if (request instanceof EqualSplitRequest equalRequest) {
             return createEqualSplitExpense(equalRequest);
         } else if (request instanceof CustomSplitRequest customRequest) {
@@ -43,7 +49,7 @@ public class ExpenseService {
         throw new IllegalArgumentException("Unknown split type");
     }
 
-    private Expense createEqualSplitExpense(EqualSplitRequest request) {
+    private ExpenseResponse createEqualSplitExpense(EqualSplitRequest request) {
         // TODO - Extract Expense and Create And Expense record in DB
         Expense expense = new Expense();
         expense.setGroupId(request.getGroupId());
@@ -80,10 +86,11 @@ public class ExpenseService {
         }
         expenseShareRepository.saveAll(expenseShares);
         publishOutbox(createdExpense, expenseShares);
-        return createdExpense;
+
+        return toExpenseResponse(createdExpense,  expenseShares);
     }
 
-    private Expense createCustomSplitExpense(CustomSplitRequest request) {
+    private ExpenseResponse createCustomSplitExpense(CustomSplitRequest request) {
         // TODO 0 : Check if total spent amount equals shared amount
         List<ParticipantShare>  participantShareList = request.getParticipantShares();
         BigDecimal participantTotalShare = BigDecimal.ZERO;
@@ -111,7 +118,8 @@ public class ExpenseService {
         }
         expenseShareRepository.saveAll(expenseShares);
         publishOutbox(createdExpense, expenseShares);
-        return createdExpense;
+
+        return toExpenseResponse(createdExpense,  expenseShares);
     }
 
     private void publishOutbox(Expense expense, List<ExpenseShare> expenseShares) {
@@ -136,8 +144,56 @@ public class ExpenseService {
         Outbox outbox = Outbox.builder()
                 .payload(expenseCreatedJson)
                 .status(OutboxStatus.PENDING)
+                .aggregateId(expense.getId())
                 .build();
 
         outboxRepository.save(outbox);
+    }
+
+    private ExpenseResponse toExpenseResponse(Expense expense, List<ExpenseShare> expenseShares) {
+        List<ShareResponse> shareResponses = expenseShares.stream()
+                .map(x -> ShareResponse.builder()
+                        .shareAmount(x.getShareAmount())
+                        .userId(x.getUserId())
+                        .build())
+                .toList();
+
+        return ExpenseResponse.builder()
+                .id(expense.getId())
+                .groupId(expense.getGroupId())
+                .paidBy(expense.getPaidBy())
+                .totalAmount(expense.getTotalAmount())
+                .createdAt(expense.getCreatedAt())
+                .shares(shareResponses)
+                .build();
+    }
+
+    public ExpenseResponse getExpenseById(Long id) {
+        Expense expense = expenseRepository.findById(id)
+                .orElseThrow(() ->  new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "Expense with id " + id + " not found"
+                ));
+
+        List<ExpenseShare> expenseShares = expenseShareRepository.findByExpense_Id(expense.getId());
+        return toExpenseResponse(expense, expenseShares);
+    }
+
+
+    public Page<ExpenseResponse> getExpenseByGroup(Long groupId, int page, int size, String sortBy, String sortDirection) {
+        Sort sort = Sort.by(Sort.Direction.fromString(sortDirection), sortBy);
+        Pageable pageable = PageRequest.of(page, size, sort);
+        Page<Expense> expenses = expenseRepository.findByGroupId(groupId, pageable);
+        List<Long> expenseIds = new ArrayList<>();
+        for (Expense expense : expenses) {
+            expenseIds.add(expense.getId());
+        }
+        List<ExpenseShare> expenseShares = expenseShareRepository.findByExpense_IdIn(expenseIds);
+        Map<Long, List<ExpenseShare>> expenseShareMap = expenseShares.stream()
+                .collect(Collectors.groupingBy(share -> share.getExpense().getId()));
+
+        return expenses.map(expense -> {
+            List<ExpenseShare> sharesForThisExpense = expenseShareMap.getOrDefault(expense.getId(), List.of());
+            return toExpenseResponse(expense, sharesForThisExpense);
+        });
     }
 }
