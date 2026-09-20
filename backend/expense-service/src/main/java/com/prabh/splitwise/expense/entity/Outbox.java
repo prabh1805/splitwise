@@ -32,4 +32,6 @@ public class Outbox {
     private Instant updatedAt;
 
     private Instant publishedAt;
+
+    private Long aggregateId;
 }
