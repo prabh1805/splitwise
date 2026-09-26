@@ -25,10 +25,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -137,6 +134,7 @@ public class ExpenseService {
                 .paidBy(expense.getPaidBy())
                 .totalAmount(expense.getTotalAmount())
                 .shares(shareInfos)
+                .eventId(String.valueOf(UUID.randomUUID()))
                 .build();
 
         String expenseCreatedJson = objectMapper.writeValueAsString(expenseCreatedEvent);
