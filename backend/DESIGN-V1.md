@@ -8,7 +8,7 @@ This covers the two services built so far, **expense-service** and **balance-ser
                  POST /api/v1/expenses
                           │
                           ▼
-┌──────────────────── expense-service (MySQL: expense_service, port 8080) ────────────────┐
+┌──────────────────── expense-service (MySQL: expense_service, port 8080) ─────────────────┐
 │  ExpenseController → ExpenseService                                                      │
 │     one DB transaction:  expense  +  expense_share rows  +  outbox row (PENDING)         │
 │                                                                                          │
@@ -16,7 +16,7 @@ This covers the two services built so far, **expense-service** and **balance-ser
 └──────────────────────────────────────────────────────────────────────────────────────────┘
                           │  topic: expense-created   key: expenseId   value: JSON
                           ▼
-┌──────────────────────── balance-service (MySQL: balance_service, port 8081) ────────────┐
+┌──────────────────────── balance-service (MySQL: balance_service, port 8081) ─────────────┐
 │  ExpenseCreatedConsumer → LedgerService → ledger_entry rows (one per debtor)             │
 │                                                                                          │
 │  BalanceController → sums ledger per (debtor, creditor) pair → nets opposite pairs       │
