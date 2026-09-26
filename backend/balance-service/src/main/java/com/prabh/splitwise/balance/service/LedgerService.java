@@ -55,7 +55,7 @@ public class LedgerService {
                     .build());
         }
 
-        ledgerRepository.saveAll(ledgerEntryList);
+        createLedger(ledgerEntryList);
     }
 
     @Transactional(readOnly = true)
@@ -105,5 +105,15 @@ public class LedgerService {
             }
         }
         return groupBalances;
+    }
+
+    @Transactional
+    public List<LedgerEntry> createLedger(List<LedgerEntry> entries) {
+        return ledgerRepository.saveAll(entries);
+    }
+
+    @Transactional
+    public LedgerEntry createLedger(LedgerEntry entry) {
+        return ledgerRepository.save(entry);
     }
 }
