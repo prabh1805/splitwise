@@ -8,7 +8,7 @@ This covers the two services built so far, **expense-service** and **balance-ser
                  POST /api/v1/expenses
                           │
                           ▼
-┌──────────────────────── expense-service (MySQL: expense_service) ───────────────────────┐
+┌──────────────────── expense-service (MySQL: expense_service, port 8080) ────────────────┐
 │  ExpenseController → ExpenseService                                                      │
 │     one DB transaction:  expense  +  expense_share rows  +  outbox row (PENDING)         │
 │                                                                                          │
@@ -28,7 +28,9 @@ This covers the two services built so far, **expense-service** and **balance-ser
 
 - Each service owns its own database. Neither one reads the other's tables.
 - The services only talk through Kafka (Aiven-hosted, SASL_SSL + SCRAM-SHA-256, CA cert loaded from `ca.pem` on the classpath).
-- Payloads are plain JSON strings (String serializer/deserializer), not Avro or typed JSON serde. Each side has its own copy of the event class, so they aren't coupled by a shared library.
+- Payloads are plain JSON strings (String serializer/deserializer), not Avro or typed JSON serde. Each side has its own copy of the event class.
+  - **Benefit:** no shared library, so the services aren't compile-coupled and can be versioned and deployed independently.
+  - **Cost:** if the copies drift apart, nothing fails. Spring Boot's `ObjectMapper` ignores unknown properties, so a renamed or missing field just arrives as `null`. A shared event module would catch that at compile time, but it would compile-couple the two services and force them to bump versions together.
 
 ---
 
@@ -62,7 +64,9 @@ The shared fields (`paidBy`, `totalAmount > 0`, `splitType`) are validated with 
 ### Money handling
 
 - Always `BigDecimal`, never `double`.
-- **Equal split**: each share is `total / n` rounded **down** to 2 decimals. The leftover paise (always fewer than `n`) go to the **first participant**, so the shares always add up to exactly the total. Example: ₹100 / 3 → 33.34, 33.33, 33.33.
+- **Equal split**: each share is `total / n` rounded **down** to 2 decimals. The leftover paise (always fewer than `n`) go to the **first participant**, so the shares always add up to exactly the total. Examples:
+  - ₹100 / 3 → base 33.33, 1 paisa left over → 33.34, 33.33, 33.33.
+  - ₹100 / 6 → base 16.66 × 6 = 99.96, 4 paise left over, **all to the first participant** → 16.70, 16.66, 16.66, 16.66, 16.66, 16.66.
 - **Custom split**: the request is rejected (`400`) unless the shares add up to exactly `totalAmount`.
 
 ### Transactional outbox
@@ -138,13 +142,13 @@ The shared fields (`paidBy`, `totalAmount > 0`, `splitType`) are validated with 
 
 - The entity is Hibernate `@Immutable`, has no setters, and has a protected no-arg constructor, so rows can't be edited.
 - **Why:** there's a full audit trail, no read-modify-write races on a shared balance row, and every balance can be traced back to its source expense. Balances are always derived, so there's nothing to drift out of sync.
-- `SourceType.SETTLEMENT` is there so a future "settle up" can be one more ledger entry in the opposite direction instead of a special case.
+- `SourceType.SETTLEMENT` was reserved from the start so that settle up could be one more ledger entry in the opposite direction instead of a special case. It's now used that way (see **Settle up** below).
 
 ### Consuming `expense-created`
 
 For each share in the event, write one entry `debtor = share.userId → creditor = paidBy` for `share.amount`. **The payer's own share is skipped** (you don't owe yourself). All entries for one event are saved in a single transaction.
 
-**Malformed events** (missing `eventId`, `expenseId`, `paidBy` or `shares`) are logged and skipped. They could never succeed, so letting them go through the listener's retries would only block the partition.
+**Malformed events** (missing `eventId`, `expenseId`, `paidBy` or `shares`) are logged and skipped. They could never succeed. Spring Kafka's default error handler would retry each one (10 attempts) and then commit past it, so the partition does unblock in the end. The cost is ten identical failures and ten stack traces for an event that was never going to work. (A poison row blocking the queue was a real problem in the outbox poller, not here.)
 
 ### Idempotency
 
@@ -191,7 +195,12 @@ debtor = receiverId → creditor = payerId, amount, sourceType = SETTLEMENT, sou
 
 That's the reverse of the original debt, so the existing `netPairs` logic cancels it out with no special case. This is exactly what `SourceType.SETTLEMENT` was reserved for. A rejected settlement never touches the ledger, so the ledger stays a record of money that actually moved.
 
-**Idempotency:** the client sends an `idempotencyKey` (UUID). It's unique in the `settlement` table, so a retried `POST` hits the constraint and gets `409` instead of creating a second settlement. The same key is reused as the ledger `eventId`, and the `(eventId, debtor_id)` constraint means one settlement can never produce two ledger entries.
+**No check against the actual debt (deliberate).** The amount isn't validated against the current balance:
+- **A check would race.** Expense events keep arriving, so the balance you validated can be out of date by the time the settlement is inserted.
+- **Over- and under-payment are legitimate.** The ledger handles both as plain arithmetic. If B owes A ₹200 and settles ₹500, the pair nets to A owing B ₹300, with no special case.
+- The receiver's acknowledgment is the human check.
+
+**Idempotency:** the client sends an `idempotencyKey` (UUID). It's unique in the `settlement` table, so a retried `POST` hits the constraint and gets `409` instead of creating a second settlement. The `409` is deliberate, to match acknowledge/reject, which also return `409` for repeated work. Returning `200` with the existing settlement is a possible alternative, but the current behavior isn't a bug. The same key is reused as the ledger `eventId`, and the `(eventId, debtor_id)` constraint means one settlement can never produce two ledger entries.
 
 ### Errors
 
@@ -206,13 +215,14 @@ balance-service now has its own `GlobalExceptionHandler`, same shape as expense-
 - **`FAILED` outbox rows** have no replay endpoint or alert yet. They only show up in the logs.
 - **No group/membership validation.** `groupId` is optional, and nothing checks that participants or the payer belong to the group, or that the payer is a participant.
 - **Custom split** doesn't reject duplicate user ids up front. The DB unique constraint catches them, but as a 500 instead of a 400.
-- **`findPairBalancesByGroupId`** aliases the sum as `total`, while the user query and `PairBalance` use `amount`. Worth making them match.
+- **`PairBalance` is bound by position, not by alias.** `findPairBalancesByGroupId` aliases the sum as `total`, but the record's component is `amount`, and the endpoint still returns correct values. So Spring Data is matching columns to the record's constructor by position. If someone reorders the record's components (e.g. swaps `debtorId` and `creditorId`), the columns silently bind to the wrong fields and nothing errors. Fix: make the aliases match (`amount`), and cover it with a test.
 - The unique constraint mixes a logical name (`eventId`) with a physical one (`debtor_id`). It works, but `event_id` would be consistent.
 - **Both services use `ddl-auto=update`.** OK for dev, but move to migrations (Flyway) before keeping real data.
 - Balance-service's Kafka config still has a temporary `System.out.println`.
 - **No auth.** The acting user for acknowledge/reject is a `userId` query param, so anyone can pass the receiver's id. Should come from a token once there's a user service.
-- **Settlements aren't checked against the actual debt.** You can settle more than you owe (or settle with someone you owe nothing), which just flips the balance the other way.
-- **Retrying a settlement `POST` returns `409`**, not the settlement that was already created. A true idempotent retry should return the original with `200`.
+- **`DataIntegrityViolationException` catches are too broad.** The consumer's "already processed" and settlement create's "duplicate key" both catch any integrity violation. A NOT NULL or data-too-long error would be reported as a duplicate.
+- **`statusChangedAt` comes before `createdAt` on a new settlement.** The service sets `statusChangedAt = Instant.now()` before `@CreationTimestamp` fires at persist time, so `statusChangedAt` ends up slightly *earlier* than `createdAt`.
+- **`GET /api/v1/settlements/{id}` has no caller check.** Anyone can read any settlement by id.
 - No endpoint to list settlements (e.g. pending ones waiting on me, or all settlements in a group), and no way for the payer to cancel a `PENDING` one.
 - `SettlementService.acknowledge` saves the settlement twice. Harmless, but the second save can go.
 - The generic 500 handler in expense-service still returns `e.getMessage()` to the client, which can leak internal details. balance-service already does this right; copy that.
