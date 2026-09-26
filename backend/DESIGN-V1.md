@@ -1,6 +1,6 @@
-# Backend Design
+# Backend Design — V1
 
-This covers the two services built so far, **expense-service** and **balance-service**: how they fit together, and why things are done the way they are.
+This covers the two services built so far, **expense-service** and **balance-service** (including settle up): how they fit together, and why things are done the way they are.
 
 ## Overview
 
@@ -20,6 +20,9 @@ This covers the two services built so far, **expense-service** and **balance-ser
 │  ExpenseCreatedConsumer → LedgerService → ledger_entry rows (one per debtor)             │
 │                                                                                          │
 │  BalanceController → sums ledger per (debtor, creditor) pair → nets opposite pairs       │
+│                                                                                          │
+│  SettlementController → SettlementService → settlement row (PENDING)                     │
+│     receiver acknowledges → ACKNOWLEDGED + one SETTLEMENT ledger entry (same txn)        │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -122,6 +125,10 @@ The shared fields (`paidBy`, `totalAmount > 0`, `splitType`) are validated with 
 |---|---|---|
 | `GET` | `/api/v1/balances?groupId=` | Net "who owes whom" within a group: `[{ debtorId, creditorId, amount }]` |
 | `GET` | `/api/v1/balances/users/{userId}` | That user's net position with everyone: `[{ otherUserId, amount, youOwe }]` |
+| `POST` | `/api/v1/settlements` | Record a payment `{ idempotencyKey, payerId, receiverId, groupId?, amount }` → `201`, `PENDING` |
+| `POST` | `/api/v1/settlements/{id}/acknowledge?userId=` | Receiver confirms the money arrived → `ACKNOWLEDGED` |
+| `POST` | `/api/v1/settlements/{id}/reject?userId=` | Receiver says it never arrived → `REJECTED` |
+| `GET` | `/api/v1/settlements/{id}` | Get one settlement |
 
 ### Ledger, not running balances
 
@@ -157,6 +164,39 @@ Consumer group is `balance-service` with `auto.offset.reset = earliest`, so a ne
 
 The user endpoint nets **across all groups**, like Splitwise's overall "you owe / you are owed" total. The group endpoint only looks at one group.
 
+### Settle up
+
+**Problem:** when A pays B back outside the app, the balance has to go down. But A alone saying "I paid" shouldn't be enough to wipe out a debt.
+
+**Decision:** a settlement is a two-step handshake. The payer records it, and it only counts once the **receiver acknowledges** it.
+
+`Settlement`: `idempotencyKey` (unique), `payerId`, `receiverId`, `groupId` (optional), `amount` (`DECIMAL(19,2)`), `status`, `createdAt`, `statusChangedAt`.
+
+```
+            create                acknowledge (receiver only)
+  (none) ─────────▶ PENDING ─────────────────────────────▶ ACKNOWLEDGED  → ledger entry written
+                       │
+                       └──────── reject (receiver only) ──▶ REJECTED     → no ledger change
+```
+
+- **Only `PENDING` can move.** Acknowledging or rejecting anything else is a `409`. Both final states are terminal.
+- **Only the receiver** can acknowledge or reject (`403` otherwise). For now the caller's id is a `userId` query param, since there's no auth yet.
+- `payerId == receiverId` is rejected with `400`.
+
+**Hitting the ledger:** on acknowledge, in the **same transaction** as the status change, one entry is written:
+
+```
+debtor = receiverId → creditor = payerId, amount, sourceType = SETTLEMENT, sourceId = settlement.id, eventId = idempotencyKey
+```
+
+That's the reverse of the original debt, so the existing `netPairs` logic cancels it out with no special case. This is exactly what `SourceType.SETTLEMENT` was reserved for. A rejected settlement never touches the ledger, so the ledger stays a record of money that actually moved.
+
+**Idempotency:** the client sends an `idempotencyKey` (UUID). It's unique in the `settlement` table, so a retried `POST` hits the constraint and gets `409` instead of creating a second settlement. The same key is reused as the ledger `eventId`, and the `(eventId, debtor_id)` constraint means one settlement can never produce two ledger entries.
+
+### Errors
+
+balance-service now has its own `GlobalExceptionHandler`, same shape as expense-service: `IllegalArgumentException` → 400, validation → 400 with `fieldErrors`, `ResponseStatusException` → its status. The catch-all 500 logs the stack trace server-side and returns a generic "Something went wrong", so internals don't leak to the client.
+
 ---
 
 ## Known gaps / TODO
@@ -168,7 +208,12 @@ The user endpoint nets **across all groups**, like Splitwise's overall "you owe 
 - **Custom split** doesn't reject duplicate user ids up front. The DB unique constraint catches them, but as a 500 instead of a 400.
 - **`findPairBalancesByGroupId`** aliases the sum as `total`, while the user query and `PairBalance` use `amount`. Worth making them match.
 - The unique constraint mixes a logical name (`eventId`) with a physical one (`debtor_id`). It works, but `event_id` would be consistent.
-- **Balance-service uses `ddl-auto=create`**, which wipes the ledger on every restart. Fine for dev, but switch to `update` or migrations (Flyway) before keeping real data. Expense-service already uses `update`.
-- Balance-service has no global exception handler yet, and its Kafka config still has a temporary `System.out.println`.
-- The generic 500 handler in expense-service returns `e.getMessage()` to the client, which can leak internal details.
-- No tests yet for the split math, the poller outcomes or the netting logic.
+- **Both services use `ddl-auto=update`.** OK for dev, but move to migrations (Flyway) before keeping real data.
+- Balance-service's Kafka config still has a temporary `System.out.println`.
+- **No auth.** The acting user for acknowledge/reject is a `userId` query param, so anyone can pass the receiver's id. Should come from a token once there's a user service.
+- **Settlements aren't checked against the actual debt.** You can settle more than you owe (or settle with someone you owe nothing), which just flips the balance the other way.
+- **Retrying a settlement `POST` returns `409`**, not the settlement that was already created. A true idempotent retry should return the original with `200`.
+- No endpoint to list settlements (e.g. pending ones waiting on me, or all settlements in a group), and no way for the payer to cancel a `PENDING` one.
+- `SettlementService.acknowledge` saves the settlement twice. Harmless, but the second save can go.
+- The generic 500 handler in expense-service still returns `e.getMessage()` to the client, which can leak internal details. balance-service already does this right; copy that.
+- No tests yet for the split math, the poller outcomes, the netting logic or the settlement state machine.
