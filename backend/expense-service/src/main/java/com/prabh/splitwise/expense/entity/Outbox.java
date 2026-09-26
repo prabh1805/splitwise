@@ -33,5 +33,9 @@ public class Outbox {
 
     private Instant publishedAt;
 
+    @Builder.Default
+    @Column(nullable = false)
+    private int attemptCount = 0;
+
     private Long aggregateId;
 }
