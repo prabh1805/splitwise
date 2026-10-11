@@ -22,7 +22,7 @@ This covers the three services built so far: **user-group-service** (registratio
                           │
                           ▼  POST /api/v1/expenses
 ┌──────────────────── expense-service (MySQL: expense_service, port 8080) ─────────────────┐
-│  (JWT verification with the public key: in progress, see Authentication)                 │
+│  JwtAuthenticationFilter verifies Bearer tokens with the public key → userId             │
 │  ExpenseController → ExpenseService                                                      │
 │     one DB transaction:  expense  +  expense_share rows  +  outbox row (PENDING)         │
 │                                                                                          │
@@ -61,7 +61,7 @@ This covers the three services built so far: **user-group-service** (registratio
 
 ### Data model
 
-- **`Expense`**: `id`, `groupId`, `paidBy`, `totalAmount` (`DECIMAL(12,2)`), timestamps.
+- **`Expense`**: `id`, `groupId`, `description` (optional, up to 100 chars, not part of the Kafka event), `paidBy`, `totalAmount` (`DECIMAL(12,2)`), timestamps.
 - **`ExpenseShare`**: one row per participant, `(expense_id, user_id)` unique, `shareAmount`. The payer can also have a share; that's their own part of the bill.
 - **`Outbox`**: `payload` (JSON column), `status` (`PENDING` / `PUBLISHED` / `FAILED`), `aggregateId` (the expense id), `attemptCount`, `publishedAt`.
 
@@ -140,14 +140,17 @@ The shared fields (`paidBy`, `totalAmount > 0`, `splitType`) are validated with 
 
 ### API
 
+All endpoints need `Authorization: Bearer <jwt>`. The caller is the token's user id, never a request parameter.
+
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/api/v1/balances?groupId=` | Net "who owes whom" within a group: `[{ debtorId, creditorId, amount }]` |
-| `GET` | `/api/v1/balances/users/{userId}` | That user's net position with everyone: `[{ otherUserId, amount, youOwe }]` |
-| `POST` | `/api/v1/settlements` | Record a payment `{ idempotencyKey, payerId, receiverId, groupId?, amount }` → `201`, `PENDING` |
-| `POST` | `/api/v1/settlements/{id}/acknowledge?userId=` | Receiver confirms the money arrived → `ACKNOWLEDGED` |
-| `POST` | `/api/v1/settlements/{id}/reject?userId=` | Receiver says it never arrived → `REJECTED` |
-| `GET` | `/api/v1/settlements/{id}` | Get one settlement |
+| `GET` | `/api/v1/balances/users/{userId}` | Your net position with everyone: `[{ otherUserId, amount, youOwe }]`. `403` unless `userId` is you |
+| `POST` | `/api/v1/settlements` | Record a payment `{ idempotencyKey, payerId, receiverId, groupId?, amount }` → `201`, `PENDING`. `403` unless `payerId` is you |
+| `POST` | `/api/v1/settlements/{id}/acknowledge` | Receiver confirms the money arrived → `ACKNOWLEDGED` |
+| `POST` | `/api/v1/settlements/{id}/reject` | Receiver says it never arrived → `REJECTED` |
+| `GET` | `/api/v1/settlements` | Your latest 50 settlements (as payer or receiver), newest first |
+| `GET` | `/api/v1/settlements/{id}` | Get one settlement. `404` unless you're the payer or receiver |
 
 ### Ledger, not running balances
 
@@ -199,7 +202,7 @@ The user endpoint nets **across all groups**, like Splitwise's overall "you owe 
 ```
 
 - **Only `PENDING` can move.** Acknowledging or rejecting anything else is a `409`. Both final states are terminal.
-- **Only the receiver** can acknowledge or reject (`403` otherwise). For now the caller's id is a `userId` query param, since there's no auth yet.
+- **Only the payer** can record a settlement, and **only the receiver** can acknowledge or reject it (`403` otherwise). Both are the user id from the JWT.
 - `payerId == receiverId` is rejected with `400`.
 
 **Hitting the ledger:** on acknowledge, in the **same transaction** as the status change, one entry is written:
@@ -225,7 +228,7 @@ balance-service now has its own `GlobalExceptionHandler`, same shape as expense-
 
 ## user-group-service
 
-Owns users, groups and group memberships, and issues the access tokens the other services trust. Groups and memberships have entities but no API yet.
+Owns users, groups and group memberships, and issues the access tokens the other services trust.
 
 ### API
 
@@ -234,7 +237,15 @@ Owns users, groups and group memberships, and issues the access tokens the other
 | `POST` | `/api/v1/auth/register` | public | Create a user `{ name, email, password }` → `201` with `{ id, name, email, createdAt }` |
 | `POST` | `/api/v1/auth/login` | public | `{ email, password }` → `200` with `{ accessToken, refreshToken, tokenType: "Bearer", expiresIn }` |
 | `POST` | `/api/v1/auth/refresh` | public | `{ refreshToken }` → `200` with the same shape as login. The old refresh token stops working |
-| `GET` | `/api/v1/users/me` | Bearer | Who the token belongs to (for now a plain string, for testing) |
+| `GET` | `/api/v1/users/me` | Bearer | The caller as `{ id, name, email, createdAt }` |
+| `GET` | `/api/v1/users?ids=1,2` | Bearer | Names for up to 100 ids → `[{ id, name, email }]`. Only the caller and people who share a group with them; other ids are left out |
+| `POST` | `/api/v1/groups` | Bearer | Create `{ name }` → `201` with the group; the caller becomes its creator and first member |
+| `GET` | `/api/v1/groups` | Bearer | The caller's groups `[{ id, name, createdBy, memberCount, createdAt }]`, newest first |
+| `GET` | `/api/v1/groups/{id}` | Bearer | Group with `members: [{ id, name, email, joinedAt }]` |
+| `PATCH` | `/api/v1/groups/{id}` | Bearer | Rename `{ name }` (any member) |
+| `DELETE` | `/api/v1/groups/{id}` | Bearer | Delete the group and its memberships (creator only) → `204` |
+| `POST` | `/api/v1/groups/{id}/members` | Bearer | Add `{ email }` (any member) → the updated group. `404` if nobody registered with that email, `409` if already a member |
+| `DELETE` | `/api/v1/groups/{id}/members/{userId}` | Bearer | Remove a member (creator) or leave (yourself) → `204` |
 
 ### Data model
 
@@ -242,6 +253,13 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **`Group`** (table `user_group`, because `group` is a reserved word in SQL): `id`, `groupName`, `createdBy` (`LAZY` `@ManyToOne` to `User`), `createdAt`.
 - **`Membership`**: composite key `MembershipId(userId, groupId)` via `@EmbeddedId` + `@MapsId`, so one user can join a group only once, enforced by the primary key. Has `joinedAt`.
 - **`RefreshToken`** (table `refresh_token`): `id`, `user` (`LAZY` `@ManyToOne`, `user_id`), `tokenHash` (unique, SHA-256 hex, 64 chars), `expiresAt`, `revoked` (default `false`), `createdAt`. One row per issued refresh token. Rows are revoked, never deleted.
+
+### Groups
+
+- **Membership is the access check.** Every group endpoint first checks the `(userId, groupId)` membership row. A non-member gets the same `404 "Group not found"` as a missing group, so group ids can't be probed.
+- **Who can do what:** any member can view, rename and add people. Only the creator can remove other members or delete the group. Anyone except the creator can leave. The creator can't leave or be removed, so a group always has an owner (they delete it instead).
+- **Members are added by email**, normalized the same way as login. Duplicate adds are checked up front (`409`), and the membership primary key catches a concurrent duplicate (`DataIntegrityViolationException` → `409`).
+- **User lookup is scoped.** `GET /api/v1/users?ids=` exists so the UI can show names for ids that come from expense-service and balance-service. It only returns people who share a group with the caller, so it can't be used to list every user's name and email.
 
 ### Registration
 
@@ -276,7 +294,7 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **Concurrent reuse:** two requests with the same token can both pass the "not revoked" check. The revoke is a conditional `UPDATE … SET revoked = true WHERE id = :id AND revoked = false`, and only the request that gets `1` row affected continues. The other gets `401`. So one refresh token yields at most one new pair.
 - `/api/v1/auth/refresh` is under `/api/v1/auth/**`, so it's public. The refresh token is the credential, and the client can call it after the access token has expired.
 
-**Rolling it out to the other services (in progress):** expense-service now has `spring-boot-starter-security`, jjwt, and copies of `JwtKeyConfig`, `JwtService` and `JwtAuthenticationFilter`. It's meant to verify tokens with the public key only. The copies aren't adapted yet (see **Known gaps**). balance-service hasn't started.
+**The other services:** expense-service and balance-service each have `spring-boot-starter-security`, jjwt, and their own `JwtKeyConfig` (public key only), `JwtService` (verify only, no `generateToken`), `JwtAuthenticationFilter` and `SecurityConfig` (stateless, `/error` public, everything else needs a token, `401` entry point). Neither holds the private key, so neither can mint tokens. The Kafka consumer in balance-service isn't an HTTP request, so security doesn't touch it.
 
 ---
 
@@ -291,21 +309,17 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - The unique constraint mixes a logical name (`eventId`) with a physical one (`debtor_id`). It works, but `event_id` would be consistent.
 - **Both services use `ddl-auto=update`.** OK for dev, but move to migrations (Flyway) before keeping real data.
 - Balance-service's Kafka config still has a temporary `System.out.println`.
-- **No auth in balance-service yet.** The acting user for acknowledge/reject is a `userId` query param, so anyone can pass the receiver's id. Should come from the JWT principal once the filter is rolled out there.
 - **`DataIntegrityViolationException` catches are too broad.** The consumer's "already processed" and settlement create's "duplicate key" both catch any integrity violation. A NOT NULL or data-too-long error would be reported as a duplicate.
 - **`statusChangedAt` comes before `createdAt` on a new settlement.** The service sets `statusChangedAt = Instant.now()` before `@CreationTimestamp` fires at persist time, so `statusChangedAt` ends up slightly *earlier* than `createdAt`.
-- **`GET /api/v1/settlements/{id}` has no caller check.** Anyone can read any settlement by id.
-- No endpoint to list settlements (e.g. pending ones waiting on me, or all settlements in a group), and no way for the payer to cancel a `PENDING` one.
+- `GET /api/v1/settlements` returns the latest 50 with no paging, and there's no way for the payer to cancel a `PENDING` one.
+- **`GET /api/v1/balances?groupId=` doesn't check group membership.** Any logged-in user can read any group's balances, because balance-service can't tell who is in a group (same gap as expense-service, see below).
 - `SettlementService.acknowledge` saves the settlement twice. Harmless, but the second save can go.
 - The generic 500 handler in expense-service still returns `e.getMessage()` to the client, which can leak internal details. balance-service already does this right; copy that.
 - No tests yet for the split math, the poller outcomes, the netting logic or the settlement state machine.
 
 ### Auth / user-group-service
 
-- **expense-service JWT files are unedited copies and won't compile.** `JwtKeyConfig`, `JwtService` and `JwtAuthenticationFilter` under expense-service still declare `package com.prabh.splitwise.usergroup.*` and import `usergroup.entity.User` / `usergroup.service.JwtService`, which don't exist in that module. They need the `com.prabh.splitwise.expense` packages.
-- **expense-service would need the private key.** The copied `JwtKeyConfig` builds a `PrivateKey` bean from `jwt.private-key`, and `JwtService` needs `jwt.access-token-ttl`. expense-service only sets `jwt.public-key`, so startup would fail. Worse, giving it the private key would defeat the point of RSA. expense-service should only load the public key and only verify tokens (no `generateToken`).
-- **expense-service has no `SecurityFilterChain`.** With the security starter on the classpath, Spring Boot's default applies: every endpoint needs HTTP Basic/form login with a generated password, and the JWT filter isn't registered. It needs its own `SecurityConfig` like user-group-service's (stateless, JWT filter, `401` entry point).
-- **The JWT code is now copied between services.** Fine for now, matching the "own copy of the event class" choice. If it spreads to balance-service too, a small shared `security` module, or Spring's `oauth2-resource-server` with a public key, would remove three copies.
+- **The JWT verification code is copied three times** (user-group, expense, balance). Fine for now, matching the "own copy of the event class" choice. A small shared `security` module, or Spring's `oauth2-resource-server` configured with the public key, would remove the copies.
 - **No logout or "revoke all sessions".** Nothing revokes a user's refresh tokens on logout or password change. Access tokens still can't be revoked at all and stay valid for their full 30 minutes.
 - **No reuse detection.** Presenting an already revoked refresh token only gets a `401`. A stricter setup treats that as theft and revokes every refresh token from the same login (a token family), which needs a `familyId` column.
 - **Bad refresh token says "Invalid email or password".** `GlobalExceptionHandler` maps every `AuthenticationException` to that message. The `401` is right, but the text is wrong for `/refresh`.
@@ -315,6 +329,6 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **`user-group-service` uses `ddl-auto=create`**, which drops and recreates every table on each restart, so registered users disappear. Switch to `update` (or Flyway) like the other services.
 - `logging.level.org.springframework.security=DEBUG` is still on in user-group-service.
 - `LoginRequest` reuses the register rules (`@Email`, `@Size(min = 8)`), so a short password at login gets a `400` with field errors instead of `401`. Login should probably only check `@NotBlank`.
-- `/api/v1/users/me` loads the user on each call and returns a string. It should return `UserResponse`.
-- user-group-service's `GlobalExceptionHandler` only handles `AuthenticationException`. Validation errors and `ResponseStatusException` fall back to Spring's default error body, unlike the other two services.
-- No group or membership endpoints yet (create group, add member, list my groups), so the "is this user in this group?" check expense-service needs doesn't exist yet.
+- user-group-service returns `ProblemDetail` (`detail`, plus `fieldErrors` for validation), while the other two services return `{ status, message, fieldErrors }`. The frontend reads both, but one shape would be simpler.
+- **Group membership isn't enforced outside user-group-service.** expense-service accepts any `groupId`, `paidBy` and participant ids, and balance-service accepts any settlement parties. It needs a membership check (call user-group-service, or put group ids in the token) before the ids can be trusted.
+- **Deleting a group or removing a member leaves their expenses and balances in place.** Nothing stops removing someone who still owes money, and a deleted group's expenses still count in each person's overall balance. Splitwise blocks removing a member with a non-zero balance; that needs a balance-service check.
