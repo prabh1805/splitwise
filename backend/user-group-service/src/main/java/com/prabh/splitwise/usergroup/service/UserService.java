@@ -3,6 +3,7 @@ package com.prabh.splitwise.usergroup.service;
 import com.prabh.splitwise.usergroup.dto.RegisterRequest;
 import com.prabh.splitwise.usergroup.dto.UserSummary;
 import com.prabh.splitwise.usergroup.entity.User;
+import com.prabh.splitwise.usergroup.repository.FriendshipRepository;
 import com.prabh.splitwise.usergroup.repository.MembershipRepository;
 import com.prabh.splitwise.usergroup.repository.UserRepository;
 import com.prabh.splitwise.usergroup.util.EmailNormalizer;
@@ -14,7 +15,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -27,6 +29,7 @@ public class UserService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final MembershipRepository membershipRepository;
+    private final FriendshipRepository friendshipRepository;
 
     private static final int MAX_LOOKUP = 100;
 
@@ -64,11 +67,13 @@ public class UserService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At most " + MAX_LOOKUP + " ids per request");
         }
         Set<Long> wanted = new HashSet<>(ids);
-        List<User> users = new ArrayList<>(membershipRepository.findUsersSharingAGroup(userId, wanted));
-        if (wanted.contains(userId) && users.stream().noneMatch(u -> u.getId().equals(userId))) {
-            users.add(getUserById(userId));
+        Map<Long, User> users = new LinkedHashMap<>();
+        membershipRepository.findUsersSharingAGroup(userId, wanted).forEach(u -> users.put(u.getId(), u));
+        friendshipRepository.findFriendsAmong(userId, wanted).forEach(u -> users.putIfAbsent(u.getId(), u));
+        if (wanted.contains(userId)) {
+            users.computeIfAbsent(userId, this::getUserById);
         }
-        return users.stream().map(u -> new UserSummary(u.getId(), u.getName(), u.getEmail())).toList();
+        return users.values().stream().map(u -> new UserSummary(u.getId(), u.getName(), u.getEmail())).toList();
     }
 
     public User getUserById(Long id){
