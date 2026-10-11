@@ -29,4 +29,16 @@ public interface LedgerRepository extends JpaRepository<LedgerEntry, Long> {
         """
     )
     List<PairBalance> findPairBalancesByUserId(@Param("userId") Long userId);
+
+    // Entries between two users that aren't part of any group (direct expenses and direct settlements)
+    @Query(
+        """
+            SELECT l.debtorId AS debtorId, l.creditorId AS creditorId, SUM(l.amount) AS amount
+            FROM LedgerEntry l
+            WHERE l.groupId IS NULL
+              AND ((l.debtorId = :a AND l.creditorId = :b) OR (l.debtorId = :b AND l.creditorId = :a))
+            GROUP BY l.debtorId, l.creditorId
+        """
+    )
+    List<PairBalance> findDirectPairBalances(@Param("a") Long a, @Param("b") Long b);
 }

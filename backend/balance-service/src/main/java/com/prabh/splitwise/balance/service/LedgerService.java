@@ -65,6 +65,16 @@ public class LedgerService {
     }
 
     @Transactional(readOnly = true)
+    // Net between the two users outside any group; amount is zero when they're even
+    public UserBalance getDirectBalance(Long userId, Long otherUserId) {
+        List<GroupBalance> net = netPairs(ledgerRepository.findDirectPairBalances(userId, otherUserId));
+        if (net.isEmpty()) {
+            return new UserBalance(otherUserId, BigDecimal.ZERO, false);
+        }
+        GroupBalance balance = net.get(0);
+        return new UserBalance(otherUserId, balance.amount(), balance.debtorId().equals(userId));
+    }
+
     public List<UserBalance> getUserBalances(Long userId) {
         List<PairBalance> pairBalances = ledgerRepository.findPairBalancesByUserId(userId);
         List<GroupBalance> groupBalances = netPairs(pairBalances);

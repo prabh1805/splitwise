@@ -34,6 +34,13 @@ public class BalanceController {
         return ResponseEntity.ok(new GroupBalancesResponse(groupId, body));
     }
 
+    @GetMapping("/direct")
+    public ResponseEntity<UserBalanceResponse> getDirectBalance(@AuthenticationPrincipal Long userId,
+                                                                @RequestParam("with") Long otherUserId) {
+        UserBalance balance = ledgerService.getDirectBalance(userId, otherUserId);
+        return ResponseEntity.ok(new UserBalanceResponse(balance.otherUserId(), balance.amount(), balance.youOwe()));
+    }
+
     @GetMapping("/users/{userId}")
     public ResponseEntity<UserBalancesResponse> getUserBalances(@PathVariable Long userId,
                                                                 @AuthenticationPrincipal Long callerId) {
