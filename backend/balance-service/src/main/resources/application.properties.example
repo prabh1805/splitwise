@@ -1,0 +1,20 @@
+spring.application.name=balance-service
+server.port=8081
+
+spring.datasource.url=jdbc:mysql://localhost:3306/balance_service?createDatabaseIfNotExist=true
+spring.datasource.username=root
+spring.datasource.password=CHANGE_ME
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+
+# Kafka CA cert is loaded from ca.pem in this folder (gitignored)
+aiven.kafka.bootstrap-servers=your-service-name.aivencloud.com:PORT
+aiven.kafka.username=avnadmin
+aiven.kafka.password=CHANGE_ME
+
+logging.file.name=logs/balance-service.log
+logging.level.root=WARN
+logging.level.com.prabh.splitwise=INFO
+logging.level.org.springframework.kafka.listener=INFO

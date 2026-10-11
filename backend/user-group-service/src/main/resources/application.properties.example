@@ -1,0 +1,19 @@
+spring.application.name=user-group-service
+server.port=8082
+
+spring.datasource.url=jdbc:mysql://localhost:3306/usergroup_service?createDatabaseIfNotExist=true
+spring.datasource.username=root
+spring.datasource.password=CHANGE_ME
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+
+# RSA key pair (PEM), kept outside the repo. Generate with:
+#   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private.pem
+#   openssl rsa -in private.pem -pubout -out public.pem
+jwt.private-key=file:${user.home}/splitwise-keys/private.pem
+jwt.public-key=file:${user.home}/splitwise-keys/public.pem
+
+# Access token lifetime in seconds
+jwt.access-token-ttl=1800
