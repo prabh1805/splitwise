@@ -58,6 +58,7 @@ This covers the three services built so far: **user-group-service** (registratio
 | `POST` | `/api/v1/expenses` | Create an expense (equal or custom split) |
 | `GET` | `/api/v1/expenses/{id}` | Get one expense with its shares |
 | `GET` | `/api/v1/expenses?groupId=&page=&size=&sortBy=&sortDirection=` | Paged expenses for a group |
+| `GET` | `/api/v1/expenses/direct?with=&page=&size=` | Paged non-group expenses that both you and `with` are part of (as payer or with a share), newest first |
 
 ### Data model
 
@@ -66,6 +67,8 @@ This covers the three services built so far: **user-group-service** (registratio
 - **`Outbox`**: `payload` (JSON column), `status` (`PENDING` / `PUBLISHED` / `FAILED`), `aggregateId` (the expense id), `attemptCount`, `publishedAt`.
 
 Users and groups are just `Long` ids. user-group-service now owns users, groups and memberships, but expense-service doesn't call it, so nothing checks that the ids exist.
+
+**Direct expenses** have no `groupId`. Since no group ties the people together, the caller must be the payer or one of the participants (`403` otherwise). They flow through the same outbox, event and ledger as group expenses, with `groupId = null`.
 
 ### Polymorphic request
 
@@ -146,6 +149,7 @@ All endpoints need `Authorization: Bearer <jwt>`. The caller is the token's user
 |---|---|---|
 | `GET` | `/api/v1/balances?groupId=` | Net "who owes whom" within a group: `[{ debtorId, creditorId, amount }]` |
 | `GET` | `/api/v1/balances/users/{userId}` | Your net position with everyone: `[{ otherUserId, amount, youOwe }]`. `403` unless `userId` is you |
+| `GET` | `/api/v1/balances/direct?with=` | Your net with one person outside any group (ledger rows with `groupId = null`: direct expenses and settlements) → `{ otherUserId, amount, youOwe }`, `amount` 0 when even |
 | `POST` | `/api/v1/settlements` | Record a payment `{ idempotencyKey, payerId, receiverId, groupId?, amount }` → `201`, `PENDING`. `403` unless `payerId` is you |
 | `POST` | `/api/v1/settlements/{id}/acknowledge` | Receiver confirms the money arrived → `ACKNOWLEDGED` |
 | `POST` | `/api/v1/settlements/{id}/reject` | Receiver says it never arrived → `REJECTED` |
@@ -238,7 +242,9 @@ Owns users, groups and group memberships, and issues the access tokens the other
 | `POST` | `/api/v1/auth/login` | public | `{ email, password }` → `200` with `{ accessToken, refreshToken, tokenType: "Bearer", expiresIn }` |
 | `POST` | `/api/v1/auth/refresh` | public | `{ refreshToken }` → `200` with the same shape as login. The old refresh token stops working |
 | `GET` | `/api/v1/users/me` | Bearer | The caller as `{ id, name, email, createdAt }` |
-| `GET` | `/api/v1/users?ids=1,2` | Bearer | Names for up to 100 ids → `[{ id, name, email }]`. Only the caller and people who share a group with them; other ids are left out |
+| `GET` | `/api/v1/users?ids=1,2` | Bearer | Names for up to 100 ids → `[{ id, name, email }]`. Only the caller, their friends, and people who share a group with them; other ids are left out |
+| `GET` | `/api/v1/friends` | Bearer | Your friends `[{ id, name, email }]`, by name |
+| `POST` | `/api/v1/friends` | Bearer | Add a friend `{ email }` → `{ id, name, email }`. Mutual and idempotent. `404` unknown email, `400` yourself |
 | `POST` | `/api/v1/groups` | Bearer | Create `{ name }` → `201` with the group; the caller becomes its creator and first member |
 | `GET` | `/api/v1/groups` | Bearer | The caller's groups `[{ id, name, createdBy, memberCount, createdAt }]`, newest first |
 | `GET` | `/api/v1/groups/{id}` | Bearer | Group with `members: [{ id, name, email, joinedAt }]` |
@@ -253,6 +259,11 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **`Group`** (table `user_group`, because `group` is a reserved word in SQL): `id`, `groupName`, `createdBy` (`LAZY` `@ManyToOne` to `User`), `createdAt`.
 - **`Membership`**: composite key `MembershipId(userId, groupId)` via `@EmbeddedId` + `@MapsId`, so one user can join a group only once, enforced by the primary key. Has `joinedAt`.
 - **`RefreshToken`** (table `refresh_token`): `id`, `user` (`LAZY` `@ManyToOne`, `user_id`), `tokenHash` (unique, SHA-256 hex, 64 chars), `expiresAt`, `revoked` (default `false`), `createdAt`. One row per issued refresh token. Rows are revoked, never deleted.
+
+### Friends
+
+- **Why:** direct (non-group) expenses need a way to find someone and to show their name later. Group membership already makes people visible to each other; friendship does the same without a group.
+- **`Friendship`** has composite key `(userId, friendId)`. Adding a friend writes both directions, so "my friends" is one indexed lookup and the relationship is always mutual. Re-adding is a no-op, so the endpoint is safe to retry.
 
 ### Groups
 
@@ -330,5 +341,7 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - `logging.level.org.springframework.security=DEBUG` is still on in user-group-service.
 - `LoginRequest` reuses the register rules (`@Email`, `@Size(min = 8)`), so a short password at login gets a `400` with field errors instead of `401`. Login should probably only check `@NotBlank`.
 - user-group-service returns `ProblemDetail` (`detail`, plus `fieldErrors` for validation), while the other two services return `{ status, message, fieldErrors }`. The frontend reads both, but one shape would be simpler.
-- **Group membership isn't enforced outside user-group-service.** expense-service accepts any `groupId`, `paidBy` and participant ids, and balance-service accepts any settlement parties. It needs a membership check (call user-group-service, or put group ids in the token) before the ids can be trusted.
+- **Group membership isn't enforced outside user-group-service.** expense-service accepts any `groupId`, `paidBy` and participant ids for group expenses (direct expenses at least require the caller to take part), and balance-service accepts any settlement parties. It needs a membership check (call user-group-service, or put group ids in the token) before the ids can be trusted.
 - **Deleting a group or removing a member leaves their expenses and balances in place.** Nothing stops removing someone who still owes money, and a deleted group's expenses still count in each person's overall balance. Splitwise blocks removing a member with a non-zero balance; that needs a balance-service check.
+- **Settling up from a friend's page records a direct settlement** (`groupId = null`). It reduces the overall balance correctly, but if the debt came from a group, that group still shows it and the direct balance goes the other way by the same amount. Splitwise spreads such a payment across the groups; that would need balance-service to split one settlement into per-group ledger entries.
+- Friendships can't be removed yet.
