@@ -5,16 +5,18 @@ This covers the three services built so far: **user-group-service** (registratio
 ## Overview
 
 ```
-          POST /api/v1/auth/register  ·  POST /api/v1/auth/login
+          POST /api/v1/auth/register  ·  /login  ·  /refresh
                           │
                           ▼
 ┌──────────────────── user-group-service (MySQL: usergroup_service, port 8082) ────────────┐
 │  AuthController → UserService → user row (BCrypt hash, normalized email)                 │
 │  login → AuthenticationManager → JwtService signs access token (RSA private key)         │
+│        → RefreshTokenService stores SHA-256 of a random refresh token                    │
+│  refresh → revoke old refresh token (conditional UPDATE) → issue new pair                │
 │                                                                                          │
 │  JwtAuthenticationFilter verifies Bearer tokens with the public key → userId             │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
-                          │  { accessToken, tokenType: "Bearer", expiresIn }
+                          │  { accessToken, refreshToken, tokenType: "Bearer", expiresIn }
                           ▼
            client sends  Authorization: Bearer <jwt>  on later requests
                           │
@@ -230,7 +232,8 @@ Owns users, groups and group memberships, and issues the access tokens the other
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/api/v1/auth/register` | public | Create a user `{ name, email, password }` → `201` with `{ id, name, email, createdAt }` |
-| `POST` | `/api/v1/auth/login` | public | `{ email, password }` → `200` with `{ accessToken, tokenType: "Bearer", expiresIn }` |
+| `POST` | `/api/v1/auth/login` | public | `{ email, password }` → `200` with `{ accessToken, refreshToken, tokenType: "Bearer", expiresIn }` |
+| `POST` | `/api/v1/auth/refresh` | public | `{ refreshToken }` → `200` with the same shape as login. The old refresh token stops working |
 | `GET` | `/api/v1/users/me` | Bearer | Who the token belongs to (for now a plain string, for testing) |
 
 ### Data model
@@ -238,6 +241,7 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **`User`**: `id`, `name`, `email` (unique), `hashedPassword`, `createdAt`. It implements Spring Security's `UserDetails` directly (`username` = email, no authorities), so no separate adapter class is needed.
 - **`Group`** (table `user_group`, because `group` is a reserved word in SQL): `id`, `groupName`, `createdBy` (`LAZY` `@ManyToOne` to `User`), `createdAt`.
 - **`Membership`**: composite key `MembershipId(userId, groupId)` via `@EmbeddedId` + `@MapsId`, so one user can join a group only once, enforced by the primary key. Has `joinedAt`.
+- **`RefreshToken`** (table `refresh_token`): `id`, `user` (`LAZY` `@ManyToOne`, `user_id`), `tokenHash` (unique, SHA-256 hex, 64 chars), `expiresAt`, `revoked` (default `false`), `createdAt`. One row per issued refresh token. Rows are revoked, never deleted.
 
 ### Registration
 
@@ -258,6 +262,19 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **Verifying requests:** `JwtAuthenticationFilter` (before `UsernamePasswordAuthenticationFilter`) reads `Authorization: Bearer …` and checks the signature and expiry. On success it sets the principal to the **`Long` user id** with no DB lookup. Controllers get it with `@AuthenticationPrincipal Long userId`.
   - A missing or bad token doesn't fail in the filter. The request continues as anonymous, and protected endpoints get `401` from the `HttpStatusEntryPoint`. That way one rule decides access, and public endpoints still work with a stale token.
 - **Security config:** session policy `STATELESS`, form login and logout removed (this replaces the earlier session-based login), CSRF disabled. That's safe because the token comes from a header the browser doesn't attach automatically, unlike a cookie. `/api/v1/auth/**` and `/error` are public, everything else needs a token.
+
+### Refresh tokens
+
+**Problem:** access tokens are stateless, so they can't be revoked and must stay short-lived (30 min). Without a second credential the user has to type their password again every half hour.
+
+**Decision:** a long-lived, **opaque refresh token stored server-side**, rotated on every use.
+
+- **Issued on login** alongside the access token by `RefreshTokenService.create(user)`: 32 bytes from `SecureRandom`, Base64-URL encoded without padding. Lifetime is `jwt.refresh-token-ttl-seconds` (604800s = 7 days).
+- **Opaque, not a JWT:** a refresh token is only ever checked by user-group-service, so it doesn't need to be self-contained. Being a DB row means it can be revoked.
+- **Only the SHA-256 hash is stored**, and the raw token is never logged. Someone who reads the table can't use the tokens. A plain fast hash is enough here (unlike passwords) because the token is 256 bits of randomness, so there's nothing to brute-force. And being deterministic means it can be looked up by hash with a unique index.
+- **Rotation (`POST /api/v1/auth/refresh`)**, in one transaction: hash the raw token and look it up. Missing, expired or already revoked → `BadCredentialsException` → `401`. Otherwise revoke it and issue a new access token plus a new refresh token for the same user.
+- **Concurrent reuse:** two requests with the same token can both pass the "not revoked" check. The revoke is a conditional `UPDATE … SET revoked = true WHERE id = :id AND revoked = false`, and only the request that gets `1` row affected continues. The other gets `401`. So one refresh token yields at most one new pair.
+- `/api/v1/auth/refresh` is under `/api/v1/auth/**`, so it's public. The refresh token is the credential, and the client can call it after the access token has expired.
 
 **Rolling it out to the other services (in progress):** expense-service now has `spring-boot-starter-security`, jjwt, and copies of `JwtKeyConfig`, `JwtService` and `JwtAuthenticationFilter`. It's meant to verify tokens with the public key only. The copies aren't adapted yet (see **Known gaps**). balance-service hasn't started.
 
@@ -289,7 +306,11 @@ Owns users, groups and group memberships, and issues the access tokens the other
 - **expense-service would need the private key.** The copied `JwtKeyConfig` builds a `PrivateKey` bean from `jwt.private-key`, and `JwtService` needs `jwt.access-token-ttl`. expense-service only sets `jwt.public-key`, so startup would fail. Worse, giving it the private key would defeat the point of RSA. expense-service should only load the public key and only verify tokens (no `generateToken`).
 - **expense-service has no `SecurityFilterChain`.** With the security starter on the classpath, Spring Boot's default applies: every endpoint needs HTTP Basic/form login with a generated password, and the JWT filter isn't registered. It needs its own `SecurityConfig` like user-group-service's (stateless, JWT filter, `401` entry point).
 - **The JWT code is now copied between services.** Fine for now, matching the "own copy of the event class" choice. If it spreads to balance-service too, a small shared `security` module, or Spring's `oauth2-resource-server` with a public key, would remove three copies.
-- **No refresh tokens or logout.** Once issued, a token is valid for its full 30 minutes, and there's no way to revoke it (e.g. after a password change). The user has to log in again when it expires.
+- **No logout or "revoke all sessions".** Nothing revokes a user's refresh tokens on logout or password change. Access tokens still can't be revoked at all and stay valid for their full 30 minutes.
+- **No reuse detection.** Presenting an already revoked refresh token only gets a `401`. A stricter setup treats that as theft and revokes every refresh token from the same login (a token family), which needs a `familyId` column.
+- **Bad refresh token says "Invalid email or password".** `GlobalExceptionHandler` maps every `AuthenticationException` to that message. The `401` is right, but the text is wrong for `/refresh`.
+- **Old refresh tokens are never cleaned up.** Every refresh adds a row and revoked or expired rows stay forever. Needs a scheduled delete of rows past `expiresAt`.
+- **Refresh token is returned in the JSON body.** Fine for mobile/API clients. A browser client should get it as an `HttpOnly` `Secure` cookie scoped to `/api/v1/auth/refresh` instead, so JavaScript (and XSS) can't read it.
 - **No `iss`/`aud` claims.** Any token signed by the key is accepted by any service. Fine with one issuer, but adding `iss` and checking it is cheap.
 - **`user-group-service` uses `ddl-auto=create`**, which drops and recreates every table on each restart, so registered users disappear. Switch to `update` (or Flyway) like the other services.
 - `logging.level.org.springframework.security=DEBUG` is still on in user-group-service.

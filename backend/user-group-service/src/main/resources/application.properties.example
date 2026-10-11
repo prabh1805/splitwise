@@ -17,3 +17,6 @@ jwt.public-key=file:${user.home}/splitwise-keys/public.pem
 
 # Access token lifetime in seconds
 jwt.access-token-ttl=1800
+
+# Refresh token lifetime in seconds (7 days)
+jwt.refresh-token-ttl-seconds=604800

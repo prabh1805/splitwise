@@ -2,10 +2,12 @@ package com.prabh.splitwise.usergroup.controller;
 
 import com.prabh.splitwise.usergroup.dto.LoginRequest;
 import com.prabh.splitwise.usergroup.dto.LoginResponse;
+import com.prabh.splitwise.usergroup.dto.RefreshRequest;
 import com.prabh.splitwise.usergroup.dto.RegisterRequest;
 import com.prabh.splitwise.usergroup.dto.UserResponse;
 import com.prabh.splitwise.usergroup.entity.User;
 import com.prabh.splitwise.usergroup.service.JwtService;
+import com.prabh.splitwise.usergroup.service.RefreshTokenService;
 import com.prabh.splitwise.usergroup.service.UserService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +29,7 @@ public class AuthController {
     private final UserService userService;
     private final AuthenticationManager authenticationManager;
     private final JwtService jwtService;
+    private final RefreshTokenService refreshTokenService;
 
     @Value("${jwt.access-token-ttl}")
     private Long accessTokenTtl;
@@ -53,9 +56,14 @@ public class AuthController {
                 )
         );
         User user = (User) auth.getPrincipal();
-        String accessToken = null;
-        accessToken = jwtService.generateToken(user);
+        String accessToken = jwtService.generateToken(user);
+        String refreshToken = refreshTokenService.create(user);
 
-        return ResponseEntity.ok(new LoginResponse(accessToken, "Bearer", accessTokenTtl));
+        return ResponseEntity.ok(new LoginResponse(accessToken, refreshToken, "Bearer", accessTokenTtl));
+    }
+
+    @PostMapping("/refresh")
+    public ResponseEntity<LoginResponse> refresh(@Valid @RequestBody RefreshRequest refreshRequest) {
+        return ResponseEntity.ok(refreshTokenService.rotate(refreshRequest.refreshToken()));
     }
 }
