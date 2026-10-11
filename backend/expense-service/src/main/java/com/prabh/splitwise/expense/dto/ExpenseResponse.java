@@ -14,6 +14,7 @@ import java.util.List;
 public class ExpenseResponse {
     private Long id;
     private Long groupId;
+    private String description;
     private Long paidBy;
     private BigDecimal totalAmount;
     private List<ShareResponse> shares;

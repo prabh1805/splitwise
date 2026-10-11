@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.prabh.splitwise.expense.enums.SplitType;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -26,6 +27,10 @@ import java.math.BigDecimal;
 @NoArgsConstructor
 public abstract class ExpenseRequest {
     private Long groupId;
+
+    @Size(max = 100, message = "description can be at most 100 characters")
+    private String description;
+
 
     @NotNull(message = "paid by cannot be null")
     private Long paidBy;

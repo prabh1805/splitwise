@@ -20,6 +20,10 @@ public class Expense {
     private Long id;
 
     private Long groupId;
+
+    @Column(length = 100)
+    private String description;
+
     private Long paidBy;
 
     @Column(precision = 12, scale = 2)

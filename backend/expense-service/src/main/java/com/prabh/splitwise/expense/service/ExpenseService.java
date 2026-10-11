@@ -50,6 +50,7 @@ public class ExpenseService {
         // TODO - Extract Expense and Create And Expense record in DB
         Expense expense = new Expense();
         expense.setGroupId(request.getGroupId());
+        expense.setDescription(request.getDescription() == null ? null : request.getDescription().strip());
         expense.setPaidBy(request.getPaidBy());
         expense.setTotalAmount(request.getTotalAmount());
 
@@ -100,6 +101,7 @@ public class ExpenseService {
         // TODO 1 : Extract  expense from request
         Expense expense = new Expense();
         expense.setGroupId(request.getGroupId());
+        expense.setDescription(request.getDescription() == null ? null : request.getDescription().strip());
         expense.setPaidBy(request.getPaidBy());
         expense.setTotalAmount(request.getTotalAmount());
 
@@ -159,6 +161,7 @@ public class ExpenseService {
         return ExpenseResponse.builder()
                 .id(expense.getId())
                 .groupId(expense.getGroupId())
+                .description(expense.getDescription())
                 .paidBy(expense.getPaidBy())
                 .totalAmount(expense.getTotalAmount())
                 .createdAt(expense.getCreatedAt())
