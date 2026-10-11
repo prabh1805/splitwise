@@ -1,7 +1,9 @@
 package com.prabh.splitwise.usergroup.service;
 
 import com.prabh.splitwise.usergroup.dto.RegisterRequest;
+import com.prabh.splitwise.usergroup.dto.UserSummary;
 import com.prabh.splitwise.usergroup.entity.User;
+import com.prabh.splitwise.usergroup.repository.MembershipRepository;
 import com.prabh.splitwise.usergroup.repository.UserRepository;
 import com.prabh.splitwise.usergroup.util.EmailNormalizer;
 import lombok.RequiredArgsConstructor;
@@ -12,7 +14,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 
 @Service
@@ -20,6 +26,9 @@ import java.util.Optional;
 public class UserService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final MembershipRepository membershipRepository;
+
+    private static final int MAX_LOOKUP = 100;
 
 
     @Transactional
@@ -47,6 +56,19 @@ public class UserService {
 
     private String getHashedPassword(String password) {
         return passwordEncoder.encode(password);
+    }
+
+    @Transactional(readOnly = true)
+    public List<UserSummary> lookupVisibleUsers(Long userId, List<Long> ids) {
+        if (ids.size() > MAX_LOOKUP) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At most " + MAX_LOOKUP + " ids per request");
+        }
+        Set<Long> wanted = new HashSet<>(ids);
+        List<User> users = new ArrayList<>(membershipRepository.findUsersSharingAGroup(userId, wanted));
+        if (wanted.contains(userId) && users.stream().noneMatch(u -> u.getId().equals(userId))) {
+            users.add(getUserById(userId));
+        }
+        return users.stream().map(u -> new UserSummary(u.getId(), u.getName(), u.getEmail())).toList();
     }
 
     public User getUserById(Long id){
