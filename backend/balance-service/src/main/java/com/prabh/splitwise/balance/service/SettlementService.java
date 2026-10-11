@@ -1,5 +1,6 @@
 package com.prabh.splitwise.balance.service;
 
+import java.util.List;
 import com.prabh.splitwise.balance.dto.request.CreateSettlementRequest;
 
 import com.prabh.splitwise.balance.entity.LedgerEntry;
@@ -26,7 +27,11 @@ public class SettlementService {
 
 
     @Transactional
-    public Settlement create(CreateSettlementRequest request) {
+    // Only the payer can record a payment; the receiver then acknowledges or rejects it
+    public Settlement create(CreateSettlementRequest request, Long callerId) {
+        if (!request.getPayerId().equals(callerId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only record payments you made");
+        }
         if (request.getPayerId().equals(request.getReceiverId())) {
             throw new IllegalArgumentException("payerId and receiverId must be different");
         }
@@ -102,8 +107,19 @@ public class SettlementService {
     }
 
     @Transactional(readOnly = true)
-    public Settlement get(Long id) {
-        return settlementRepository.findById(id).orElseThrow(
-                () -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Settlement not found for id: " + id));
+    // Latest settlements the user paid or received, newest first
+    public List<Settlement> listForUser(Long userId) {
+        return settlementRepository.findTop50ByPayerIdOrReceiverIdOrderByCreatedAtDesc(userId, userId);
+    }
+
+    // Only the payer and receiver can see a settlement; anyone else gets the same 404 as a missing one
+    public Settlement get(Long id, Long callerId) {
+        Settlement settlement = settlementRepository.findById(id)
+                .filter(s -> s.getPayerId().equals(callerId) || s.getReceiverId().equals(callerId))
+                .orElse(null);
+        if (settlement == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Settlement not found for id: " + id);
+        }
+        return settlement;
     }
 }

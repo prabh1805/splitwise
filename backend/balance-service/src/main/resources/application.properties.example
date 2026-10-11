@@ -18,3 +18,6 @@ logging.file.name=logs/balance-service.log
 logging.level.root=WARN
 logging.level.com.prabh.splitwise=INFO
 logging.level.org.springframework.kafka.listener=INFO
+
+# Public key only; the private key stays with user-group-service
+jwt.public-key=file:${user.home}/splitwise-keys/public.pem
