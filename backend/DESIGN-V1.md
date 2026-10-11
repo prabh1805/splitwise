@@ -1,14 +1,26 @@
 # Backend Design — V1
 
-This covers the two services built so far, **expense-service** and **balance-service** (including settle up): how they fit together, and why things are done the way they are.
+This covers the three services built so far: **user-group-service** (registration and JWT login), **expense-service** and **balance-service** (including settle up). It explains how they fit together and why things are done the way they are.
 
 ## Overview
 
 ```
-                 POST /api/v1/expenses
+          POST /api/v1/auth/register  ·  POST /api/v1/auth/login
                           │
                           ▼
+┌──────────────────── user-group-service (MySQL: usergroup_service, port 8082) ────────────┐
+│  AuthController → UserService → user row (BCrypt hash, normalized email)                 │
+│  login → AuthenticationManager → JwtService signs access token (RSA private key)         │
+│                                                                                          │
+│  JwtAuthenticationFilter verifies Bearer tokens with the public key → userId             │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+                          │  { accessToken, tokenType: "Bearer", expiresIn }
+                          ▼
+           client sends  Authorization: Bearer <jwt>  on later requests
+                          │
+                          ▼  POST /api/v1/expenses
 ┌──────────────────── expense-service (MySQL: expense_service, port 8080) ─────────────────┐
+│  (JWT verification with the public key: in progress, see Authentication)                 │
 │  ExpenseController → ExpenseService                                                      │
 │     one DB transaction:  expense  +  expense_share rows  +  outbox row (PENDING)         │
 │                                                                                          │
@@ -16,7 +28,7 @@ This covers the two services built so far, **expense-service** and **balance-ser
 └──────────────────────────────────────────────────────────────────────────────────────────┘
                           │  topic: expense-created   key: expenseId   value: JSON
                           ▼
-┌──────────────────────── balance-service (MySQL: balance_service, port 8081) ─────────────┐
+┌──────────────────── balance-service (MySQL: balance_service, port 8081) ─────────────────┐
 │  ExpenseCreatedConsumer → LedgerService → ledger_entry rows (one per debtor)             │
 │                                                                                          │
 │  BalanceController → sums ledger per (debtor, creditor) pair → nets opposite pairs       │
@@ -27,7 +39,8 @@ This covers the two services built so far, **expense-service** and **balance-ser
 ```
 
 - Each service owns its own database. Neither one reads the other's tables.
-- The services only talk through Kafka (Aiven-hosted, SASL_SSL + SCRAM-SHA-256, CA cert loaded from `ca.pem` on the classpath).
+- Nothing calls another service over HTTP at runtime. The only link to user-group-service is the JWT it issues: other services check the token with the RSA **public key** and never call back to it (see **Authentication**).
+- expense-service and balance-service only talk through Kafka (Aiven-hosted, SASL_SSL + SCRAM-SHA-256, CA cert loaded from `ca.pem` on the classpath).
 - Payloads are plain JSON strings (String serializer/deserializer), not Avro or typed JSON serde. Each side has its own copy of the event class.
   - **Benefit:** no shared library, so the services aren't compile-coupled and can be versioned and deployed independently.
   - **Cost:** if the copies drift apart, nothing fails. Spring Boot's `ObjectMapper` ignores unknown properties, so a renamed or missing field just arrives as `null`. A shared event module would catch that at compile time, but it would compile-couple the two services and force them to bump versions together.
@@ -50,7 +63,7 @@ This covers the two services built so far, **expense-service** and **balance-ser
 - **`ExpenseShare`**: one row per participant, `(expense_id, user_id)` unique, `shareAmount`. The payer can also have a share; that's their own part of the bill.
 - **`Outbox`**: `payload` (JSON column), `status` (`PENDING` / `PUBLISHED` / `FAILED`), `aggregateId` (the expense id), `attemptCount`, `publishedAt`.
 
-Users and groups are just `Long` ids. There's no user or group service yet, so nothing checks that they exist.
+Users and groups are just `Long` ids. user-group-service now owns users, groups and memberships, but expense-service doesn't call it, so nothing checks that the ids exist.
 
 ### Polymorphic request
 
@@ -208,6 +221,48 @@ balance-service now has its own `GlobalExceptionHandler`, same shape as expense-
 
 ---
 
+## user-group-service
+
+Owns users, groups and group memberships, and issues the access tokens the other services trust. Groups and memberships have entities but no API yet.
+
+### API
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/register` | public | Create a user `{ name, email, password }` → `201` with `{ id, name, email, createdAt }` |
+| `POST` | `/api/v1/auth/login` | public | `{ email, password }` → `200` with `{ accessToken, tokenType: "Bearer", expiresIn }` |
+| `GET` | `/api/v1/users/me` | Bearer | Who the token belongs to (for now a plain string, for testing) |
+
+### Data model
+
+- **`User`**: `id`, `name`, `email` (unique), `hashedPassword`, `createdAt`. It implements Spring Security's `UserDetails` directly (`username` = email, no authorities), so no separate adapter class is needed.
+- **`Group`** (table `user_group`, because `group` is a reserved word in SQL): `id`, `groupName`, `createdBy` (`LAZY` `@ManyToOne` to `User`), `createdAt`.
+- **`Membership`**: composite key `MembershipId(userId, groupId)` via `@EmbeddedId` + `@MapsId`, so one user can join a group only once, enforced by the primary key. Has `joinedAt`.
+
+### Registration
+
+- **Emails are normalized** (`trim` + lowercase, `Locale.ROOT`) on both register and login, so `Foo@X.com ` and `foo@x.com` are the same account. `Locale.ROOT` avoids locale bugs like the Turkish dotless `i`.
+- **Passwords are hashed with BCrypt.** The 8 to 72 character limit matches BCrypt, which ignores anything after 72 bytes.
+- **Duplicate email → `409`**, checked twice: `existsByEmail` gives a clean error in the normal case, and the unique constraint catches two registrations racing each other (`DataIntegrityViolationException` → `409`).
+
+### Authentication
+
+**Problem:** expense-service and balance-service need to know who is calling. Calling user-group-service on every request would make it a runtime dependency of everything, and sessions don't work across services.
+
+**Decision:** stateless **JWT access tokens signed with RSA** (jjwt 0.13).
+
+- **Login:** `AuthController` passes the credentials to an `AuthenticationManager` (a `DaoAuthenticationProvider` using `DbUserDetailsService` + BCrypt). A bad email or password throws `AuthenticationException`, and `GlobalExceptionHandler` maps it to `401 "Invalid email or password"`. The message is the same for both, so the endpoint doesn't reveal which emails are registered.
+- **Token:** `sub` = user id, `iat`, `exp` = now + `jwt.access-token-ttl` (1800s = 30 min). No other claims. jjwt picks the RSA algorithm from the key size (RS256 for a 2048-bit key).
+- **Why RSA and not a shared HMAC secret:** only user-group-service holds the **private key** and can sign tokens. Other services get just the **public key**, which can verify tokens but not create them. If expense-service leaked its key, nobody could forge tokens with it.
+- **Keys** are PEM files read from `~/splitwise-keys/` (`jwt.private-key`, `jwt.public-key`), outside the repo. `JwtKeyConfig` strips the PEM header and footer and loads them as PKCS#8 (private) and X.509 (public).
+- **Verifying requests:** `JwtAuthenticationFilter` (before `UsernamePasswordAuthenticationFilter`) reads `Authorization: Bearer …` and checks the signature and expiry. On success it sets the principal to the **`Long` user id** with no DB lookup. Controllers get it with `@AuthenticationPrincipal Long userId`.
+  - A missing or bad token doesn't fail in the filter. The request continues as anonymous, and protected endpoints get `401` from the `HttpStatusEntryPoint`. That way one rule decides access, and public endpoints still work with a stale token.
+- **Security config:** session policy `STATELESS`, form login and logout removed (this replaces the earlier session-based login), CSRF disabled. That's safe because the token comes from a header the browser doesn't attach automatically, unlike a cookie. `/api/v1/auth/**` and `/error` are public, everything else needs a token.
+
+**Rolling it out to the other services (in progress):** expense-service now has `spring-boot-starter-security`, jjwt, and copies of `JwtKeyConfig`, `JwtService` and `JwtAuthenticationFilter`. It's meant to verify tokens with the public key only. The copies aren't adapted yet (see **Known gaps**). balance-service hasn't started.
+
+---
+
 ## Known gaps / TODO
 
 - **Poller isn't safe with multiple instances.** Two expense-service instances would read the same `PENDING` rows. That's still correct thanks to consumer idempotency, but it wastes sends. Fix: `SELECT … FOR UPDATE SKIP LOCKED`, or a leader lock (ShedLock).
@@ -219,7 +274,7 @@ balance-service now has its own `GlobalExceptionHandler`, same shape as expense-
 - The unique constraint mixes a logical name (`eventId`) with a physical one (`debtor_id`). It works, but `event_id` would be consistent.
 - **Both services use `ddl-auto=update`.** OK for dev, but move to migrations (Flyway) before keeping real data.
 - Balance-service's Kafka config still has a temporary `System.out.println`.
-- **No auth.** The acting user for acknowledge/reject is a `userId` query param, so anyone can pass the receiver's id. Should come from a token once there's a user service.
+- **No auth in balance-service yet.** The acting user for acknowledge/reject is a `userId` query param, so anyone can pass the receiver's id. Should come from the JWT principal once the filter is rolled out there.
 - **`DataIntegrityViolationException` catches are too broad.** The consumer's "already processed" and settlement create's "duplicate key" both catch any integrity violation. A NOT NULL or data-too-long error would be reported as a duplicate.
 - **`statusChangedAt` comes before `createdAt` on a new settlement.** The service sets `statusChangedAt = Instant.now()` before `@CreationTimestamp` fires at persist time, so `statusChangedAt` ends up slightly *earlier* than `createdAt`.
 - **`GET /api/v1/settlements/{id}` has no caller check.** Anyone can read any settlement by id.
@@ -227,3 +282,18 @@ balance-service now has its own `GlobalExceptionHandler`, same shape as expense-
 - `SettlementService.acknowledge` saves the settlement twice. Harmless, but the second save can go.
 - The generic 500 handler in expense-service still returns `e.getMessage()` to the client, which can leak internal details. balance-service already does this right; copy that.
 - No tests yet for the split math, the poller outcomes, the netting logic or the settlement state machine.
+
+### Auth / user-group-service
+
+- **expense-service JWT files are unedited copies and won't compile.** `JwtKeyConfig`, `JwtService` and `JwtAuthenticationFilter` under expense-service still declare `package com.prabh.splitwise.usergroup.*` and import `usergroup.entity.User` / `usergroup.service.JwtService`, which don't exist in that module. They need the `com.prabh.splitwise.expense` packages.
+- **expense-service would need the private key.** The copied `JwtKeyConfig` builds a `PrivateKey` bean from `jwt.private-key`, and `JwtService` needs `jwt.access-token-ttl`. expense-service only sets `jwt.public-key`, so startup would fail. Worse, giving it the private key would defeat the point of RSA. expense-service should only load the public key and only verify tokens (no `generateToken`).
+- **expense-service has no `SecurityFilterChain`.** With the security starter on the classpath, Spring Boot's default applies: every endpoint needs HTTP Basic/form login with a generated password, and the JWT filter isn't registered. It needs its own `SecurityConfig` like user-group-service's (stateless, JWT filter, `401` entry point).
+- **The JWT code is now copied between services.** Fine for now, matching the "own copy of the event class" choice. If it spreads to balance-service too, a small shared `security` module, or Spring's `oauth2-resource-server` with a public key, would remove three copies.
+- **No refresh tokens or logout.** Once issued, a token is valid for its full 30 minutes, and there's no way to revoke it (e.g. after a password change). The user has to log in again when it expires.
+- **No `iss`/`aud` claims.** Any token signed by the key is accepted by any service. Fine with one issuer, but adding `iss` and checking it is cheap.
+- **`user-group-service` uses `ddl-auto=create`**, which drops and recreates every table on each restart, so registered users disappear. Switch to `update` (or Flyway) like the other services.
+- `logging.level.org.springframework.security=DEBUG` is still on in user-group-service.
+- `LoginRequest` reuses the register rules (`@Email`, `@Size(min = 8)`), so a short password at login gets a `400` with field errors instead of `401`. Login should probably only check `@NotBlank`.
+- `/api/v1/users/me` loads the user on each call and returns a string. It should return `UserResponse`.
+- user-group-service's `GlobalExceptionHandler` only handles `AuthenticationException`. Validation errors and `ResponseStatusException` fall back to Spring's default error body, unlike the other two services.
+- No group or membership endpoints yet (create group, add member, list my groups), so the "is this user in this group?" check expense-service needs doesn't exist yet.
