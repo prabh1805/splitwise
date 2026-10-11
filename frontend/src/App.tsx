@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar'
 import { Toaster } from './components/Toaster'
 import { Avatar } from './components/ui'
 import { api } from './lib/api'
+import { refreshFriends, resetFriends } from './lib/friends'
 import { refreshGroups, resetGroups } from './lib/groups'
 import { useRoute } from './lib/router'
 import { session, useSession } from './lib/session'
@@ -12,11 +13,13 @@ import { useAsync } from './lib/useAsync'
 import { clearUsers, rememberUsers } from './lib/users'
 import { AuthPage } from './pages/AuthPage'
 import { Dashboard } from './pages/Dashboard'
+import { FriendPage } from './pages/FriendPage'
 import { GroupPage } from './pages/GroupPage'
 
 function logOut() {
   session.clear()
   resetGroups()
+  resetFriends()
   clearUsers()
   clearToasts()
 }
@@ -43,6 +46,7 @@ function SignedIn({ me }: { me: number }) {
 
   useEffect(() => {
     refreshGroups()
+    refreshFriends()
   }, [])
 
   useEffect(() => {
@@ -87,6 +91,8 @@ function SignedIn({ me }: { me: number }) {
         <main className="min-w-0">
           {route.name === 'group' ? (
             <GroupPage key={route.groupId} groupId={route.groupId} me={me} />
+          ) : route.name === 'friend' && route.userId !== me ? (
+            <FriendPage key={route.userId} friendId={route.userId} me={me} />
           ) : (
             <Dashboard me={me} />
           )}

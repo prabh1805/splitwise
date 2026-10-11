@@ -9,9 +9,23 @@ import { Alert, Avatar, Button, Card, Empty, ListSkeleton } from './ui'
 
 const PAGE_SIZE = 20
 
-export function ExpenseList({ groupId, me, onAdd }: { groupId: number; me: number; onAdd: () => void }) {
+// Lists either a group's expenses or the direct (no group) expenses between you and one person
+export function ExpenseList({
+  groupId,
+  withUserId,
+  me,
+  onAdd,
+}: {
+  groupId?: number
+  withUserId?: number
+  me: number
+  onAdd: () => void
+}) {
   const [page, setPage] = useState(0)
-  const load = useCallback(() => api.listExpenses(groupId, page, PAGE_SIZE), [groupId, page])
+  const load = useCallback(
+    () => (groupId != null ? api.listExpenses(groupId, page, PAGE_SIZE) : api.listDirectExpenses(withUserId!, page, PAGE_SIZE)),
+    [groupId, withUserId, page],
+  )
   const { data, error } = useAsync(load)
   const nameOf = useUserNames(data?.items.flatMap((e) => [e.paidBy, ...e.shares.map((s) => s.userId)]) ?? [])
 

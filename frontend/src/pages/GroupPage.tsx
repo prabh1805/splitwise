@@ -156,7 +156,9 @@ export function GroupPage({ groupId, me }: { groupId: number; me: number }) {
 
       {dialog?.kind === 'expense' && (
         <AddExpenseModal
-          group={group}
+          people={group.members}
+          groupId={group.id}
+          context={`In ${group.name}`}
           me={me}
           onClose={closeDialog}
           onCreated={() => {
@@ -170,9 +172,11 @@ export function GroupPage({ groupId, me }: { groupId: number; me: number }) {
       )}
       {dialog?.kind === 'settle' && (
         <SettleUpModal
-          group={group}
+          people={group.members}
+          groupId={group.id}
+          context="in this group"
           me={me}
-          balances={balances.data?.balances ?? []}
+          debts={(balances.data?.balances ?? []).filter((b) => b.debtorId === me)}
           initial={dialog.initial}
           onClose={closeDialog}
           onRecorded={(name) => {

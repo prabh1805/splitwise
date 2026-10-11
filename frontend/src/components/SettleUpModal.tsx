@@ -1,26 +1,31 @@
 import { useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { formatMoney, paiseToAmount, toPaise } from '../lib/money'
-import type { GroupBalance, GroupDetails } from '../lib/types'
+import type { UserSummary } from '../lib/types'
 import { Alert, Avatar, Button, Field, Label, Modal, Select } from './ui'
 
+// `debts` are what you owe each person in this context (a group, or directly), used to prefill the amount
 export function SettleUpModal({
-  group,
+  people,
+  groupId,
+  context,
   me,
-  balances,
+  debts,
   initial,
   onClose,
   onRecorded,
 }: {
-  group: GroupDetails
+  people: UserSummary[]
+  groupId: number | null
+  context: string
   me: number
-  balances: GroupBalance[]
+  debts: { creditorId: number; amount: number }[]
   initial?: { receiverId: number; amount: number }
   onClose: () => void
   onRecorded: (receiverName: string) => void
 }) {
-  const others = group.members.filter((m) => m.id !== me)
-  const myDebts = balances.filter((b) => b.debtorId === me).sort((a, b) => b.amount - a.amount)
+  const others = people.filter((m) => m.id !== me)
+  const myDebts = [...debts].sort((a, b) => b.amount - a.amount)
   const suggestion = initial ?? (myDebts[0] && { receiverId: myDebts[0].creditorId, amount: myDebts[0].amount })
 
   const [receiverId, setReceiverId] = useState<number | undefined>(suggestion?.receiverId ?? others[0]?.id)
@@ -30,7 +35,7 @@ export function SettleUpModal({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string>()
 
-  const receiver = group.members.find((m) => m.id === receiverId)
+  const receiver = people.find((m) => m.id === receiverId)
   const owed = myDebts.find((b) => b.creditorId === receiverId)?.amount
 
   function changed() {
@@ -46,7 +51,7 @@ export function SettleUpModal({
     setSubmitting(true)
     setError(undefined)
     try {
-      await api.createSettlement({ idempotencyKey, payerId: me, receiverId, groupId: group.id, amount: paiseToAmount(paise) })
+      await api.createSettlement({ idempotencyKey, payerId: me, receiverId, groupId: groupId ?? undefined, amount: paiseToAmount(paise) })
       onRecorded(receiver.name)
     } catch (err) {
       setError(errorMessage(err))
@@ -57,7 +62,7 @@ export function SettleUpModal({
   if (others.length === 0) {
     return (
       <Modal title="Settle up" onClose={onClose}>
-        <Alert tone="info">Add someone to this group first.</Alert>
+        <Alert tone="info">There’s nobody here to pay yet.</Alert>
       </Modal>
     )
   }
@@ -83,7 +88,7 @@ export function SettleUpModal({
 
         <div className="flex items-start justify-center gap-4 py-2 text-center">
           <div className="w-24">
-            <Avatar id={me} name={group.members.find((m) => m.id === me)?.name} size="lg" />
+            <Avatar id={me} name={people.find((m) => m.id === me)?.name} size="lg" />
             <div className="mt-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">You</div>
           </div>
           <span className="mt-3 text-2xl text-slate-300">→</span>
@@ -114,7 +119,7 @@ export function SettleUpModal({
           </Select>
           {owed != null && (
             <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-              You owe {receiver?.name} {formatMoney(owed)} in this group.
+              You owe {receiver?.name} {formatMoney(owed)} {context}.
             </p>
           )}
         </div>

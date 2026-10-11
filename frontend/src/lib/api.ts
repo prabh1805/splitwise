@@ -9,6 +9,7 @@ import type {
   Page,
   Settlement,
   TokenResponse,
+  UserBalance,
   UserBalances,
   UserResponse,
   UserSummary,
@@ -127,6 +128,10 @@ export const api = {
 
   lookupUsers: (ids: number[]) => request<UserSummary[]>(`/api/v1/users?ids=${ids.join(',')}`),
 
+  listFriends: () => request<UserSummary[]>('/api/v1/friends'),
+
+  addFriend: (email: string) => request<UserSummary>('/api/v1/friends', { method: 'POST', body: { email } }),
+
   listGroups: () => request<GroupSummary[]>('/api/v1/groups'),
 
   createGroup: (name: string) => request<GroupDetails>('/api/v1/groups', { method: 'POST', body: { name } }),
@@ -155,9 +160,16 @@ export const api = {
     return toPage(await request<RawPage<Expense>>(`/api/v1/expenses?${params}`))
   },
 
+  async listDirectExpenses(otherUserId: number, page: number, size = 10) {
+    const params = new URLSearchParams({ with: String(otherUserId), page: String(page), size: String(size) })
+    return toPage(await request<RawPage<Expense>>(`/api/v1/expenses/direct?${params}`))
+  },
+
   createExpense: (body: ExpenseRequest) => request<Expense>('/api/v1/expenses', { method: 'POST', body }),
 
   groupBalances: (groupId: number) => request<GroupBalances>(`/api/v1/balances?groupId=${groupId}`),
+
+  directBalance: (otherUserId: number) => request<UserBalance>(`/api/v1/balances/direct?with=${otherUserId}`),
 
   userBalances: (userId: number) => request<UserBalances>(`/api/v1/balances/users/${userId}`),
 

@@ -1,23 +1,28 @@
 import { useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { formatPaise, paiseToAmount, toPaise } from '../lib/money'
-import type { ExpenseRequest, GroupDetails } from '../lib/types'
+import type { ExpenseRequest, UserSummary } from '../lib/types'
 import { Alert, Avatar, Button, Field, Input, Label, Modal, SegmentedControl, Select } from './ui'
 
 type SplitType = 'EQUAL' | 'CUSTOM'
 
+// Used for both group expenses (groupId set, people = members) and direct ones (groupId null, you + one friend)
 export function AddExpenseModal({
-  group,
+  people,
+  groupId,
+  context,
   me,
   onClose,
   onCreated,
 }: {
-  group: GroupDetails
+  people: UserSummary[]
+  groupId: number | null
+  context: string
   me: number
   onClose: () => void
   onCreated: () => void
 }) {
-  const members = group.members
+  const members = people
   const [description, setDescription] = useState('')
   const [total, setTotal] = useState('')
   const [paidBy, setPaidBy] = useState(me)
@@ -42,7 +47,7 @@ export function AddExpenseModal({
   function buildRequest(): ExpenseRequest | string {
     if (!description.trim()) return 'Add a short description'
     if (!totalPaise) return 'Enter an amount greater than zero, with at most 2 decimals'
-    const base = { groupId: group.id, description: description.trim(), paidBy, totalAmount: paiseToAmount(totalPaise) }
+    const base = { groupId, description: description.trim(), paidBy, totalAmount: paiseToAmount(totalPaise) }
 
     if (splitType === 'EQUAL') {
       if (included.size === 0) return 'Pick at least one person to split with'
@@ -80,7 +85,7 @@ export function AddExpenseModal({
   return (
     <Modal
       title="Add an expense"
-      description={`In ${group.name}`}
+      description={context}
       onClose={onClose}
       size="lg"
       footer={

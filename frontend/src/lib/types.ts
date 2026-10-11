@@ -28,7 +28,7 @@ export type Expense = {
 
 export type ExpenseRequest =
   | {
-      groupId: number
+      groupId: number | null
       description: string
       paidBy: number
       totalAmount: string
@@ -36,7 +36,7 @@ export type ExpenseRequest =
       participantUserIds: number[]
     }
   | {
-      groupId: number
+      groupId: number | null
       description: string
       paidBy: number
       totalAmount: string

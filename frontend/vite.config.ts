@@ -16,6 +16,7 @@ export default defineConfig({
       '/api/v1/auth': USER_GROUP,
       '/api/v1/users': USER_GROUP,
       '/api/v1/groups': USER_GROUP,
+      '/api/v1/friends': USER_GROUP,
       '/api/v1/expenses': EXPENSE,
       '/api/v1/balances': BALANCE,
       '/api/v1/settlements': BALANCE,

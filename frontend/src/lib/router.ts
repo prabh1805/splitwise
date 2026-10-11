@@ -1,11 +1,17 @@
 import { useSyncExternalStore } from 'react'
 
-export type Route = { name: 'home' } | { name: 'register' } | { name: 'group'; groupId: number }
+export type Route =
+  | { name: 'home' }
+  | { name: 'register' }
+  | { name: 'group'; groupId: number }
+  | { name: 'friend'; userId: number }
 
 function parse(hash: string): Route {
   const path = hash.replace(/^#/, '')
   const group = path.match(/^\/groups\/(\d+)$/)
   if (group) return { name: 'group', groupId: Number(group[1]) }
+  const friend = path.match(/^\/friends\/(\d+)$/)
+  if (friend) return { name: 'friend', userId: Number(friend[1]) }
   if (path === '/register') return { name: 'register' }
   return { name: 'home' }
 }

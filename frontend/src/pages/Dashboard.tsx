@@ -1,10 +1,13 @@
 import { useCallback, useState } from 'react'
+import { BalanceBreakdown } from '../components/BalanceBreakdown'
+import { AddFriendModal } from '../components/AddFriendModal'
 import { CreateGroupModal } from '../components/CreateGroupModal'
 import { PlusIcon } from '../components/icons'
 import { Payments } from '../components/Payments'
 import { GroupIcon } from '../components/Sidebar'
 import { Alert, Avatar, Button, Card, Empty, ListSkeleton, NetLabel, Skeleton } from '../components/ui'
 import { api, errorMessage } from '../lib/api'
+import { refreshFriends, useFriends } from '../lib/friends'
 import { refreshGroups, useGroups } from '../lib/groups'
 import { breakdownWith } from '../lib/balances'
 import { formatMoney } from '../lib/money'
@@ -64,9 +67,13 @@ export function Dashboard({ me }: { me: number }) {
           onChange={() => {
             reload()
             refreshGroups()
+            refreshFriends()
           }}
         />
-        <GroupsGrid />
+        <div className="space-y-6">
+          <GroupsGrid />
+          <FriendsCard me={me} />
+        </div>
       </div>
     </div>
   )
@@ -156,14 +163,7 @@ function BalanceRow({
   const user = nameOf(balance.otherUserId)
   const name = displayName(user, balance.otherUserId, me)
   const color = tone === 'owe' ? 'text-owe-600 dark:text-owe-400' : 'text-brand-700 dark:text-brand-400'
-
-  // Positive = they owe me. The overall figure also nets in groups you've left or that were deleted,
-  // so whatever the current groups don't explain is shown as a separate line.
-  const parts = breakdownWith(me, balance.otherUserId, byGroup)
-  const total = balance.youOwe ? -balance.amount : balance.amount
-  const remainder = total - parts.reduce((sum, p) => sum + p.amount, 0)
-  const groupName = (id: number) => groups?.find((g) => g.id === id)?.name ?? `Group #${id}`
-  const loaded = groups != null && Object.keys(byGroup).length > 0
+  const groupNames = breakdownWith(me, balance.otherUserId, byGroup).map((p) => groups?.find((g) => g.id === p.groupId)?.name ?? `Group #${p.groupId}`)
 
   return (
     <li>
@@ -177,7 +177,7 @@ function BalanceRow({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">{name}</div>
           <div className="truncate text-xs text-slate-500 dark:text-slate-400">
-            {loaded && parts.length > 0 ? `in ${parts.map((p) => groupName(p.groupId)).join(', ')}` : tone === 'owe' ? 'you owe' : 'owes you'}
+            {groups ? (groupNames.length > 0 ? `in ${groupNames.join(', ')}` : 'outside groups') : tone === 'owe' ? 'you owe' : 'owes you'}
           </div>
         </div>
         <div className={`font-bold tabular-nums ${color}`}>{formatMoney(balance.amount)}</div>
@@ -186,51 +186,34 @@ function BalanceRow({
 
       {open && (
         <div className="px-5 pb-4">
-          <ul className="space-y-1 rounded-2xl bg-slate-50 p-2 dark:bg-slate-800/50">
-            {!loaded ? (
-              <li className="p-2">
-                <Skeleton className="h-8" />
-              </li>
-            ) : (
-              <>
-                {parts.map((p) => (
-                  <li key={p.groupId}>
-                    <a
-                      href={`#/groups/${p.groupId}`}
-                      className="flex items-center gap-3 rounded-xl px-2 py-2 text-sm transition hover:bg-white dark:hover:bg-slate-800"
-                    >
-                      <GroupIcon id={p.groupId} name={groupName(p.groupId)} className="size-7 text-xs" />
-                      <span className="min-w-0 flex-1 truncate font-medium">{groupName(p.groupId)}</span>
-                      <span className={`text-xs ${p.amount < 0 ? 'text-owe-600 dark:text-owe-400' : 'text-brand-700 dark:text-brand-400'}`}>
-                        {p.amount < 0 ? `you owe ${name}` : `${name} owes you`}{' '}
-                        <strong className="tabular-nums">{formatMoney(Math.abs(p.amount))}</strong>
-                      </span>
-                    </a>
-                  </li>
-                ))}
-                {Math.abs(remainder) >= 0.005 && (
-                  <li className="flex items-center gap-3 px-2 py-2 text-sm">
-                    <span className="flex size-7 items-center justify-center rounded-xl bg-slate-200 text-xs dark:bg-slate-700">…</span>
-                    <span className="min-w-0 flex-1 truncate text-slate-500 dark:text-slate-400">Groups you’re no longer in</span>
-                    <span className={`text-xs ${remainder < 0 ? 'text-owe-600 dark:text-owe-400' : 'text-brand-700 dark:text-brand-400'}`}>
-                      {remainder < 0 ? 'you owe' : 'owes you'} <strong className="tabular-nums">{formatMoney(Math.abs(remainder))}</strong>
-                    </span>
-                  </li>
-                )}
-                {parts.length > 1 && (
-                  <li className="mt-1 flex justify-between border-t border-slate-200 px-2 pt-2 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
-                    <span>Net across groups</span>
-                    <span className={`font-semibold tabular-nums ${color}`}>
-                      {tone === 'owe' ? 'you owe' : 'owes you'} {formatMoney(balance.amount)}
-                    </span>
-                  </li>
-                )}
-              </>
-            )}
-          </ul>
+          <div className="rounded-2xl bg-slate-50 p-2 dark:bg-slate-800/50">
+            <RowBreakdown me={me} balance={balance} name={name} />
+            <a
+              href={`#/friends/${balance.otherUserId}`}
+              className="mt-1 block rounded-xl px-2 py-2 text-xs font-semibold text-brand-700 hover:bg-white dark:text-brand-400 dark:hover:bg-slate-800"
+            >
+              See everything with {name} →
+            </a>
+          </div>
         </div>
       )}
     </li>
+  )
+}
+
+// Mounted only when a row is opened, so the direct balance is fetched on demand
+function RowBreakdown({ me, balance, name }: { me: number; balance: UserBalance; name: string }) {
+  const load = useCallback(() => api.directBalance(balance.otherUserId), [balance.otherUserId])
+  const { data } = useAsync(load)
+  const direct = data ? (data.youOwe ? -data.amount : data.amount) : undefined
+  return (
+    <BalanceBreakdown
+      me={me}
+      otherId={balance.otherUserId}
+      otherName={name}
+      total={balance.youOwe ? -balance.amount : balance.amount}
+      direct={direct}
+    />
   )
 }
 
@@ -293,6 +276,46 @@ function GroupsGrid() {
         </ul>
       )}
       {creating && <CreateGroupModal onClose={() => setCreating(false)} />}
+    </Card>
+  )
+}
+
+function FriendsCard({ me }: { me: number }) {
+  const { friends, overall } = useFriends()
+  const [adding, setAdding] = useState(false)
+
+  return (
+    <Card
+      title="Friends"
+      action={
+        <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
+          <PlusIcon className="size-4" /> Add friend
+        </Button>
+      }
+      padded={false}
+    >
+      {!friends ? (
+        <ListSkeleton rows={2} />
+      ) : friends.length === 0 ? (
+        <Empty icon="🤝" title="No friends yet">
+          Add someone by email to split expenses without making a group.
+        </Empty>
+      ) : (
+        <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+          {friends.map((f) => (
+            <li key={f.id}>
+              <a href={`#/friends/${f.id}`} className="flex items-center gap-3 px-5 py-3 transition hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                <Avatar id={f.id} name={f.name} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{displayName(f, f.id, me)}</span>
+                  <NetLabel net={overall[f.id] ?? 0} format={formatMoney} className="block truncate text-xs" />
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding && <AddFriendModal onClose={() => setAdding(false)} />}
     </Card>
   )
 }
