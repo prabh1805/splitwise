@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* Brand mint, used for "you are owed" and primary actions */
+  --color-brand-50: #ecfdf7;
+  --color-brand-100: #d1faec;
+  --color-brand-200: #a7f3da;
+  --color-brand-300: #6ee7c3;
+  --color-brand-400: #34d3a6;
+  --color-brand-500: #1cc29f;
+  --color-brand-600: #12a386;
+  --color-brand-700: #0f846e;
+  --color-brand-800: #0f6959;
+  --color-brand-900: #0e564a;
+  --color-brand-950: #04302a;
+
+  /* Orange, used for "you owe" */
+  --color-owe-50: #fff4ed;
+  --color-owe-100: #ffe6d4;
+  --color-owe-400: #ff8a57;
+  --color-owe-500: #ff652f;
+  --color-owe-600: #f04a12;
+  --color-owe-700: #c73609;
+
+  --animate-toast-in: toast-in 200ms ease-out;
+  --animate-dialog-in: dialog-in 180ms ease-out;
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes dialog-in {
+    from { opacity: 0; transform: translateY(12px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-slate-100 font-sans text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+  }
+  dialog::backdrop {
+    background: rgb(15 23 42 / 0.5);
+    backdrop-filter: blur(2px);
+  }
+}
