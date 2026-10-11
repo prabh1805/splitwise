@@ -37,7 +37,11 @@ public class ExpenseService {
     private final OutboxRepository outboxRepository;
 
     @Transactional
-    public ExpenseResponse createExpense(ExpenseRequest request) {
+    public ExpenseResponse createExpense(ExpenseRequest request, Long callerId) {
+        if (request.getGroupId() == null && !involves(request, callerId)) {
+            // Without a group there's nothing else tying the people together, so the caller must be one of them
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only add direct expenses you're part of");
+        }
         if (request instanceof EqualSplitRequest equalRequest) {
             return createEqualSplitExpense(equalRequest);
         } else if (request instanceof CustomSplitRequest customRequest) {
@@ -180,10 +184,27 @@ public class ExpenseService {
     }
 
 
+    private static boolean involves(ExpenseRequest request, Long userId) {
+        if (userId.equals(request.getPaidBy())) return true;
+        if (request instanceof EqualSplitRequest equal) return equal.getParticipantUserIds().contains(userId);
+        if (request instanceof CustomSplitRequest custom) {
+            return custom.getParticipantShares().stream().anyMatch(s -> userId.equals(s.getUserId()));
+        }
+        return false;
+    }
+
+    public Page<ExpenseResponse> getDirectExpenses(Long userId, Long otherUserId, int page, int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+        return toResponsePage(expenseRepository.findDirectBetween(userId, otherUserId, pageable));
+    }
+
     public Page<ExpenseResponse> getExpenseByGroup(Long groupId, int page, int size, String sortBy, String sortDirection) {
         Sort sort = Sort.by(Sort.Direction.fromString(sortDirection), sortBy);
         Pageable pageable = PageRequest.of(page, size, sort);
-        Page<Expense> expenses = expenseRepository.findByGroupId(groupId, pageable);
+        return toResponsePage(expenseRepository.findByGroupId(groupId, pageable));
+    }
+
+    private Page<ExpenseResponse> toResponsePage(Page<Expense> expenses) {
         List<Long> expenseIds = new ArrayList<>();
         for (Expense expense : expenses) {
             expenseIds.add(expense.getId());

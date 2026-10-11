@@ -1,5 +1,6 @@
 package com.prabh.splitwise.expense.controller;
 
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import com.prabh.splitwise.expense.dto.ExpenseRequest;
 import com.prabh.splitwise.expense.dto.ExpenseResponse;
 import com.prabh.splitwise.expense.entity.Expense;
@@ -19,8 +20,19 @@ public class ExpenseController {
     private final ExpenseService expenseService;
 
     @PostMapping
-    public ResponseEntity<ExpenseResponse> createExpense(@Valid @RequestBody ExpenseRequest expenseRequest) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(expenseService.createExpense(expenseRequest));
+    public ResponseEntity<ExpenseResponse> createExpense(@AuthenticationPrincipal Long userId,
+                                                         @Valid @RequestBody ExpenseRequest expenseRequest) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(expenseService.createExpense(expenseRequest, userId));
+    }
+
+    // Expenses outside any group between the caller and one other person, newest first
+    @GetMapping("/direct")
+    public ResponseEntity<Page<ExpenseResponse>> getDirectExpenses(
+            @AuthenticationPrincipal Long userId,
+            @RequestParam("with") Long otherUserId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(expenseService.getDirectExpenses(userId, otherUserId, page, size));
     }
 
     @GetMapping("/{id}")
